@@ -38,7 +38,9 @@ patch 後的 IPA 需要重新簽名才能安裝，選一種方式：
 
 ## 原理
 
-patcher 在 `libgloop.dylib` 的 key 驗證函數（`fn@0x3bc658`）中套用 4 個 NOP 指令，繞過所有 Keychain key 檢查：
+patcher 在 `libgloop.dylib` 中套用 6 個 NOP 指令，繞過兩層 key 驗證：
+
+**第一層：Keychain 快取驗證（`fn@0x3bc658`）**
 
 | 位置 | 原指令 | 說明 |
 |------|--------|------|
@@ -46,3 +48,10 @@ patcher 在 `libgloop.dylib` 的 key 驗證函數（`fn@0x3bc658`）中套用 4 
 | `0x3bc71c` | `cbz x8` | 解密字串空值檢查 |
 | `0x3bc7dc` | `cbnz w20` | SecItemCopyMatching 失敗檢查 |
 | `0x3bc7e4` | `cbz x8` | Keychain 結果空值檢查 |
+
+**第二層：HTTP 網路驗證（polling block @ `0x362da8`）**
+
+| 位置 | 原指令 | 說明 |
+|------|--------|------|
+| `0x362dc0` | `b.ne` | HTTP 完成旗標檢查 |
+| `0x362dcc` | `tbz w8, #0` | HTTP 有效旗標檢查 |

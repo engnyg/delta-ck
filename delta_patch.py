@@ -9,11 +9,14 @@ import sys, os, shutil, struct, zipfile, tempfile, argparse
 DYLIB_PATH = "Payload/Roblox.app/libgloop.dylib"
 
 PATCHES = [
-    # (fileoff, expected_bytes, description)
-    (0x3bc718, b'\x73\x2a\x01\xb4', "cbz x19 → nop  [無預存key檢查]"),
-    (0x3bc71c, b'\x48\x2a\x01\xb4', "cbz x8  → nop  [解密字串空值檢查]"),
-    (0x3bc7dc, b'\x54\x24\x01\x35', "cbnz w20→ nop  [SecItemCopyMatching失敗檢查]"),
-    (0x3bc7e4, b'\x08\x24\x01\xb4', "cbz x8  → nop  [Keychain結果空值檢查]"),
+    # Layer 1: Keychain cache bypass
+    (0x3bc718, b'\x73\x2a\x01\xb4', "cbz x19  → nop  [無預存key檢查]"),
+    (0x3bc71c, b'\x48\x2a\x01\xb4', "cbz x8   → nop  [解密字串空值檢查]"),
+    (0x3bc7dc, b'\x54\x24\x01\x35', "cbnz w20 → nop  [SecItemCopyMatching失敗檢查]"),
+    (0x3bc7e4, b'\x08\x24\x01\xb4', "cbz x8   → nop  [Keychain結果空值檢查]"),
+    # Layer 2: HTTP network validation bypass (polling block @ 0x362da8)
+    (0x362dc0, b'\xc1\x00\x00\x54', "b.ne     → nop  [HTTP completed flag檢查]"),
+    (0x362dcc, b'\x68\x00\x00\x36', "tbz w8,0 → nop  [HTTP valid flag檢查]"),
 ]
 
 NOP = b'\x1f\x20\x03\xd5'
@@ -66,7 +69,7 @@ def process_ipa(input_path: str, output_path: str):
         with open(dylib_full, 'wb') as f:
             f.write(data)
 
-        print(f"\n重新打包 IPA ({count}/4 patch 套用)...")
+        print(f"\n重新打包 IPA ({count}/{len(PATCHES)} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
             for root, dirs, files in os.walk(payload_dir):
