@@ -27,10 +27,10 @@ OVERLAY_PATCH      = (0x3a20ac, b'\xff\x43\x05\xd1', b'\xc0\x03\x5f\xd6')  # sho
 LAYER3_PATCH       = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')   # tbnz → b valid path
 INGAME_VALID_PATCH = (0x1c2b48, b'\xa0\x01\x00\x36', b'\x0d\x00\x00\x14')   # tbz → b 0x1c2b7c (always good path)
 SHOW_OVERLAY2_PATCH = (0x1b2960, b'\xf4\x4f\xbe\xa9', b'\xc0\x03\x5f\xd6') # fn@0x1b2960 (fail-path show overlay) → RET
-SHOW_OVERLAY3_PATCH = (0x1b3a90, b'\xf4\x4f\xbe\xa9', b'\xc0\x03\x5f\xd6') # fn@0x1b3a90 (invalid-path show overlay) → RET
 # Layer 6: startup overlay bypass — force fn@0x38e274 to always jump to key-processing code,
 # skipping the "no cached key" path (0x38eb98) that shows the overlay at startup
 LAYER6_PATCH       = (0x38e2f0, b'\xe0\x51\x02\x54', b'\x8f\x12\x00\x14')  # b.eq → b (always → 0x392d2c, bypasses startup overlay)
+BLR_NOP_PATCH      = (0x38e29c, b'\x00\x02\x3f\xd6', b'\x1f\x20\x03\xd5')  # BLR x16 → NOP (pre-init call at fn@0x38e274 entry)
 
 NOP = b'\x1f\x20\x03\xd5'
 
@@ -109,8 +109,8 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
 
     for label, (off, expected, replacement) in [
         ("fn@0x1b2960 (fail-path show overlay) → RET", SHOW_OVERLAY2_PATCH),
-        ("fn@0x1b3a90 (invalid-path show overlay) → RET", SHOW_OVERLAY3_PATCH),
         ("fn@0x38e274 B.eq→B (啟動overlay路徑繞過)", LAYER6_PATCH),
+        ("fn@0x38e274 BLR x16→NOP (pre-init overlay call)", BLR_NOP_PATCH),
     ]:
         found = bytes(dylib_data[off:off+4])
         if found == replacement:
@@ -167,7 +167,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + 6  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +SHOW_OVERLAY3 +LAYER6
+        total = len(PATCHES) + 6  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
