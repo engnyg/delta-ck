@@ -19,12 +19,12 @@ PATCHES = [
     (0x362dcc, b'\x68\x00\x00\x36', "tbz w8,0 → nop  [HTTP valid flag檢查]"),
     # Layer 5: in-game key check bypass (@ 0x1c2b34)
     (0x1c2b3c, b'\x81\x00\x00\x54', "b.ne     → nop  [in-game key check→無效路徑]"),
-    (0x1c2b48, b'\xa0\x01\x00\x36', "tbz x0,0 → nop  [in-game valid結果檢查]"),
 ]
 
 # Special patches: non-NOP replacements
-OVERLAY_PATCH = (0x3a20ac, b'\xff\x43\x05\xd1', b'\xc0\x03\x5f\xd6')  # show overlay fn → RET
-LAYER3_PATCH  = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')   # tbnz → b valid path
+OVERLAY_PATCH      = (0x3a20ac, b'\xff\x43\x05\xd1', b'\xc0\x03\x5f\xd6')  # show overlay fn → RET
+LAYER3_PATCH       = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')   # tbnz → b valid path
+INGAME_VALID_PATCH = (0x1c2b48, b'\xa0\x01\x00\x36', b'\x0d\x00\x00\x14')   # tbz → b 0x1c2b7c (always good path)
 
 NOP = b'\x1f\x20\x03\xd5'
 
@@ -88,6 +88,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
     else:
         print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 5: in-game valid check — TBZ → unconditional B to good path (0x1c2b7c)
+    off, expected, replacement = INGAME_VALID_PATCH
+    found = bytes(dylib_data[off:off+4])
+    if found == replacement:
+        print(f"  [已patch] 0x{off:x}: in-game valid branch")
+        patched += 1
+    elif found == expected:
+        dylib_data[off:off+4] = replacement
+        print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [tbz → b (good path永遠)]")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     return dylib_data, patched
 
 def process_ipa(input_path: str, output_path: str):
@@ -132,7 +145,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + 2  # +OVERLAY_PATCH +LAYER3_PATCH
+        total = len(PATCHES) + 3  # +OVERLAY_PATCH +LAYER3_PATCH +INGAME_VALID_PATCH
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
