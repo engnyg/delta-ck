@@ -46,6 +46,16 @@ FN_33B3A4_MOV0_PATCH = (0x33b3a4, b'\xff\x43\x02\xd1', b'\xe0\x03\x1f\xaa')  # S
 FN_33B3A4_RET_PATCH  = (0x33b3a8, b'\xf4\x4f\x07\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
 # Layer 10: overlay update function bypass (called from startup 0x2d07dc; safety guard)
 SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x3a4ed4 → RET (overlay update)
+# Layer 11: NOP every direct call to stub@0xc75680 (the PLT stub that displays the overlay UI).
+# This stub has exactly 6 BL callers; NOPping all of them silences every overlay-show path.
+LAYER11_PATCHES = [
+    (0x341fd8, b'\xaa\xcd\x24\x94', "BL c75680->nop [fn@33ea4c startup-init overlay display]"),
+    (0x3a4e9c, b'\xf9\x41\x23\x94', "BL c75680->nop [fn near 0x3a4ed4 overlay display]"),
+    (0x2e93e4, b'\xa7\x30\x26\x94', "BL c75680->nop [0x2e93e4 overlay display]"),
+    (0x2e9d64, b'\x47\x2e\x26\x94', "BL c75680->nop [0x2e9d64 overlay display]"),
+    (0x2ea6f4, b'\xe3\x2b\x26\x94', "BL c75680->nop [0x2ea6f4 overlay display]"),
+    (0x2eb06c, b'\x85\x29\x26\x94', "BL c75680->nop [0x2eb06c overlay display]"),
+]
 
 NOP = b'\x1f\x20\x03\xd5'
 
@@ -138,6 +148,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         elif found == expected:
             dylib_data[off:off+4] = replacement
             print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [{label}]")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
+    # Layer 11: NOP all 6 callers of stub@0xc75680 (overlay display PLT stub)
+    for off, expected, desc in LAYER11_PATCHES:
+        found = bytes(dylib_data[off:off+4])
+        if found == NOP:
+            print(f"  [已patch] 0x{off:x}: {desc}")
+            patched += 1
+        elif found == expected:
+            dylib_data[off:off+4] = NOP
+            print(f"  [✓] 0x{off:x}: {expected.hex()} → {NOP.hex()}  {desc}")
             patched += 1
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
