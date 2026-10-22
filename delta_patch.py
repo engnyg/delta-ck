@@ -19,8 +19,9 @@ PATCHES = [
     (0x362dcc, b'\x68\x00\x00\x36', "tbz w8,0 → nop  [HTTP valid flag檢查]"),
 ]
 
-# Special patch: not a NOP, but a direct branch to valid path
-LAYER3_PATCH = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')
+# Special patches: non-NOP replacements
+OVERLAY_PATCH = (0x3a20ac, b'\xff\x43\x05\xd1', b'\xc0\x03\x5f\xd6')  # show overlay fn → RET
+LAYER3_PATCH  = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')   # tbnz → b valid path
 
 NOP = b'\x1f\x20\x03\xd5'
 
@@ -57,6 +58,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         dylib_data[off:off+4] = NOP
         print(f"  [✓] 0x{off:x}: {expected.hex()} → {NOP.hex()}  {desc}")
         patched += 1
+
+    # Overlay prevention: patch show-overlay fn to RET immediately
+    off, expected, replacement = OVERLAY_PATCH
+    found = bytes(dylib_data[off:off+4])
+    if found == replacement:
+        print(f"  [已patch] 0x{off:x}: overlay RET")
+        patched += 1
+    elif found == expected:
+        dylib_data[off:off+4] = replacement
+        print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [show overlay fn → RET]")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
     # Layer 3: unconditional branch to valid path (special non-NOP patch)
     off, expected, replacement = LAYER3_PATCH
@@ -115,7 +129,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + 1  # +1 for LAYER3_PATCH
+        total = len(PATCHES) + 2  # +OVERLAY_PATCH +LAYER3_PATCH
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
