@@ -49,9 +49,15 @@ patcher 在 `libgloop.dylib` 中套用 6 個 NOP 指令，繞過兩層 key 驗�
 | `0x3bc7dc` | `cbnz w20` | SecItemCopyMatching 失敗檢查 |
 | `0x3bc7e4` | `cbz x8` | Keychain 結果空值檢查 |
 
-**第二層：HTTP 網路驗證（polling block @ `0x362da8`）**
+**第二層：HTTP polling bypass（@ `0x362da8`）**
 
 | 位置 | 原指令 | 說明 |
 |------|--------|------|
 | `0x362dc0` | `b.ne` | HTTP 完成旗標檢查 |
 | `0x362dcc` | `tbz w8, #0` | HTTP 有效旗標檢查 |
+
+**第三層：回應處理器強制走 valid 路徑（@ `0x392d54`）**
+
+| 位置 | 原指令 | 說明 |
+|------|--------|------|
+| `0x392d54` | `tbnz w8, #0` | 改為無條件 `b 0x397780`，永遠走 valid 路徑，跳過「密钥无效」邏輯 |
