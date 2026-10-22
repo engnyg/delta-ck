@@ -4,7 +4,7 @@ Delta IPA Key Bypass Patcher
 用法: python3 delta_patch.py <input.ipa> [output.ipa]
 """
 
-import sys, os, shutil, struct, zipfile, tempfile, argparse
+import sys, os, shutil, struct, zipfile, tempfile, argparse, plistlib
 
 DYLIB_PATH = "Payload/Roblox.app/libgloop.dylib"
 
@@ -20,6 +20,25 @@ PATCHES = [
 ]
 
 NOP = b'\x1f\x20\x03\xd5'
+
+TAG      = b'By LYSTORE'          # 10 bytes
+TAG_PAD  = TAG + b'\x00' * 6      # 16 bytes, fills LC_UUID field
+UUID_OFF = 0x850                  # LC_UUID uuid field offset in libgloop.dylib
+
+PLIST_PATH   = "Payload/Roblox.app/Info.plist"
+DISPLAY_NAME = "Delta | By LYSTORE"
+
+def stamp_dylib(dylib_data: bytearray):
+    """Hide 'By LYSTORE' in the dylib's LC_UUID field (non-functional bytes)."""
+    dylib_data[UUID_OFF:UUID_OFF + 16] = TAG_PAD
+    print(f"  [隱藏] LC_UUID @ 0x{UUID_OFF:x} ← '{TAG.decode()}'")
+
+def stamp_plist(plist_data: bytes) -> bytes:
+    """Set CFBundleDisplayName to 'Delta | By LYSTORE' (visible under app icon)."""
+    pl = plistlib.loads(plist_data)
+    pl['CFBundleDisplayName'] = DISPLAY_NAME
+    pl['CFBundleName']        = DISPLAY_NAME
+    return plistlib.dumps(pl, fmt=plistlib.FMT_BINARY)
 
 def patch_dylib(dylib_data: bytearray) -> bytearray:
     patched = 0
@@ -66,8 +85,18 @@ def process_ipa(input_path: str, output_path: str):
             print("\n沒有成功 patch 任何位置，IPA 版本可能不符。")
             sys.exit(1)
 
+        stamp_dylib(data)
+
         with open(dylib_full, 'wb') as f:
             f.write(data)
+
+        plist_full = os.path.join(tmpdir, PLIST_PATH)
+        if os.path.exists(plist_full):
+            with open(plist_full, 'rb') as f:
+                new_plist = stamp_plist(f.read())
+            with open(plist_full, 'wb') as f:
+                f.write(new_plist)
+            print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
         print(f"\n重新打包 IPA ({count}/{len(PATCHES)} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
