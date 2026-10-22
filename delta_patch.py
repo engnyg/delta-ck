@@ -17,6 +17,9 @@ PATCHES = [
     # Layer 2: HTTP network validation bypass (polling block @ 0x362da8)
     (0x362dc0, b'\xc1\x00\x00\x54', "b.ne     → nop  [HTTP completed flag檢查]"),
     (0x362dcc, b'\x68\x00\x00\x36', "tbz w8,0 → nop  [HTTP valid flag檢查]"),
+    # Layer 5: in-game key check bypass (@ 0x1c2b34)
+    (0x1c2b3c, b'\x81\x00\x00\x54', "b.ne     → nop  [in-game key check→無效路徑]"),
+    (0x1c2b48, b'\xa0\x01\x00\x36', "tbz x0,0 → nop  [in-game valid結果檢查]"),
 ]
 
 # Special patches: non-NOP replacements
