@@ -39,9 +39,12 @@ BLR_NOP_PATCH      = (0x38e29c, b'\x00\x02\x3f\xd6', b'\x1f\x20\x03\xd5')  # BLR
 # Layer 8: force-skip the 0x39786c–0x39d554 overlay block
 # x19 is set to non-zero by ADRP at 0x392d2c so CBZ x19 is never taken → enters overlay block
 CBZ_OVERLAY_PATCH  = (0x397868, b'\x73\xe7\x02\xb4', b'\x3b\x17\x00\x14')  # CBZ x19 → B 0x39d554 (always skip overlay block)
-# Layer 9: startup overlay controller creation bypass (fn@0x3a33c4, called from fn@0x33b3a4 → fn@0x34f488 → 0x2d07d4)
-SHOW_OVERLAY3_PATCH = (0x3a33c4, b'\xff\x83\x02\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x3a33c4 → RET (startup overlay create)
-# Layer 10: overlay update function bypass (called from startup 0x2d07dc; null-deref guard after Layer 9)
+# Layer 9: fn@0x33b3a4 (startup overlay init) → returns x0=0 immediately so fn@0x34f488
+# takes CBZ x0→0x352a30 (safe null-return early exit), no garbage overlay pointer stored.
+# Two-instruction patch: first instruction (SUB SP) → MOV x0,xzr; second (STP) → RET
+FN_33B3A4_MOV0_PATCH = (0x33b3a4, b'\xff\x43\x02\xd1', b'\xe0\x03\x1f\xaa')  # SUB SP → MOV x0,#0
+FN_33B3A4_RET_PATCH  = (0x33b3a8, b'\xf4\x4f\x07\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
+# Layer 10: overlay update function bypass (called from startup 0x2d07dc; safety guard)
 SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x3a4ed4 → RET (overlay update)
 
 NOP = b'\x1f\x20\x03\xd5'
@@ -124,7 +127,8 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         ("fn@0x38e274 B.eq→B (啟動overlay路徑繞過)", LAYER6_PATCH),
         ("fn@0x38e274 BLR x16→NOP (pre-init overlay call)", BLR_NOP_PATCH),
         ("0x397868 CBZ x19→B 0x39d554 (強制跳過overlay block)", CBZ_OVERLAY_PATCH),
-        ("fn@0x3a33c4 → RET (啟動overlay controller建立繞過)", SHOW_OVERLAY3_PATCH),
+        ("fn@0x33b3a4 SUB SP→MOV x0,0 (啟動overlay init強制null返回)", FN_33B3A4_MOV0_PATCH),
+        ("fn@0x33b3a4 STP→RET (啟動overlay init立即返回)", FN_33B3A4_RET_PATCH),
         ("fn@0x3a4ed4 → RET (overlay更新函數繞過)", SHOW_OVERLAY4_PATCH),
     ]:
         found = bytes(dylib_data[off:off+4])
@@ -182,7 +186,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + 9  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +SHOW_OVERLAY3 +SHOW_OVERLAY4
+        total = len(PATCHES) + 10  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
