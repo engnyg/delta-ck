@@ -20,6 +20,11 @@ PATCHES = [
     # Layer 5: in-game key check bypass (@ 0x1c2b34)
     (0x1c2b3c, b'\x81\x00\x00\x54', "b.ne     → nop  [in-game key check→無效路徑]"),
     (0x1c2b44, b'\xac\xcd\xff\x97', "BL 0x1b61f4→nop [in-game key檢查函數呼叫]"),
+    # Layer 7: key-check side-effect bypass + fn@0x38e274 flag early-return bypass
+    (0x38e2dc, b'\x05\x9f\x23\x94', "BL 0xc75ef0→nop [key check #1 side effect bypass]"),
+    (0x392d38, b'\x6e\x8c\x23\x94', "BL 0xc75ef0→nop [key check #2 side effect bypass]"),
+    (0x397790, b'\xc1\xa9\x04\x54', "B.ne→nop [flag early-return #1 skip]"),
+    (0x39779c, b'\x61\xa9\x04\x54', "B.ne→nop [flag early-return #2 skip]"),
 ]
 
 # Special patches: non-NOP replacements
@@ -167,7 +172,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + 6  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP
+        total = len(PATCHES) + 6  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP; PATCHES now 12
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
