@@ -109,6 +109,51 @@ LAYER16_PATCHES = [
     (0x3aaf98, b'\xbc\x2a\x23\x94', "BL _objc_msgSend→nop [fn@3aa68c, callee of fn@3afe10]"),
 ]
 
+# Layer 17: Runtime log stub injection into code cave at 0xe555e8
+# Hooks fn@0x3afe10 entry (original: BL 0x3bc648) to call our stub first.
+# Stub: getenv("HOME") → snprintf path → fopen("a") → fprintf → fclose,
+# then tail-calls original fn@0x3bc648 so fn@0x3afe10 continues normally.
+# Cave is in the zero-filled gap between __TEXT,__eh_frame and __DATA_CONST,__got.
+LOG_CAVE_ADDR  = 0xe555e8
+LOG_CAVE_BYTES = bytes.fromhex(
+    'fd7bbaa9e00701a9e20f02a9e41703a9'  # prologue: stp/stp/stp/stp
+    'e61f04a9f35305a9fd030091'          #           stp/stp, mov x29,sp
+    '0000009000a01b91'                  # adrp+add x0 → "HOME"
+    'ad80f897'                          # bl _getenv
+    'c00200b4'                          # cbz x0, skip_all
+    'f30300aa'                          # mov x19, x0  (save home ptr)
+    'ff0304d1f4030091'                  # sub sp,sp,#256; mov x20,sp
+    '80020091'                          # mov x0, x20  (buf)
+    '012080d2'                          # movz x1, #256
+    '0200009042b41b91'                  # adrp+add x2 → fmt string
+    'e30313aa'                          # mov x3, x19  (home)
+    'cf81f897'                          # bl _snprintf
+    '80020091'                          # mov x0, x20  (path)
+    '0100009021201c91'                  # adrp+add x1 → "a"
+    '6980f897'                          # bl _fopen
+    'e00000b4'                          # cbz x0, skip_write
+    'f30300aa'                          # mov x19, x0  (fp)
+    '0100009021281c91'                  # adrp+add x1 → msg
+    '6780f897'                          # bl _fprintf
+    'e00313aa'                          # mov x0, x19
+    '4a80f897'                          # bl _fclose
+    'ff030491'                          # skip_write: add sp,sp,#256
+    'e00741a9e20f42a9e41743a9e61f44a9'  # skip_all: ldp x0-x7
+    'f35345a9fd7bc6a8'                  # ldp x19,x20; ldp x29,x30,[sp],#96
+    'f29bd517'                          # b fn@0x3bc648  (tail-call original)
+    # 100 NUL bytes padding: brings data section to offset 0x100 from cave start
+    + '00' * 100
+    # Data strings
+    + b'HOME\x00'.hex()
+    + b'%s/Documents/delta_log.txt\x00'.hex()
+    + b'a\x00'.hex()
+    + b'[delta] fn@3afe10 triggered\n\x00'.hex()
+)
+# Original first instruction at fn@0x3afe10: BL 0x3bc648
+LOG_HOOK_ADDR     = 0x3afe10
+LOG_HOOK_EXPECTED = b'\x0e\x32\x00\x94'   # BL 0x3bc648
+LOG_HOOK_PATCH    = b'\xf6\x95\x2a\x94'   # BL 0xe555e8 (our stub)
+
 NOP = b'\x1f\x20\x03\xd5'
 
 TAG      = b'By LYSTORE'          # 10 bytes
@@ -273,6 +318,27 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 17: Inject runtime log stub into code cave at 0xe555e8
+    # Hook fn@0x3afe10 first instruction to call stub; stub logs to Documents/delta_log.txt
+    cave_off = LOG_CAVE_ADDR
+    cave_end = LOG_CAVE_ADDR + len(LOG_CAVE_BYTES)
+    cave_area = bytes(dylib_data[cave_off:cave_end])
+    hook_found = bytes(dylib_data[LOG_HOOK_ADDR:LOG_HOOK_ADDR+4])
+    if cave_area == LOG_CAVE_BYTES and hook_found == LOG_HOOK_PATCH:
+        print(f"  [已patch] 0x{LOG_CAVE_ADDR:x}: log stub (cave已注入)")
+        print(f"  [已patch] 0x{LOG_HOOK_ADDR:x}: log stub hook")
+        patched += 2
+    elif cave_area != bytes(len(LOG_CAVE_BYTES)):
+        print(f"  [跳過] 0x{LOG_CAVE_ADDR:x}: cave 非全零，跳過 log stub 注入")
+    elif hook_found != LOG_HOOK_EXPECTED:
+        print(f"  [跳過] 0x{LOG_HOOK_ADDR:x}: hook 點預期 {LOG_HOOK_EXPECTED.hex()} 但找到 {hook_found.hex()}")
+    else:
+        dylib_data[cave_off:cave_end] = LOG_CAVE_BYTES
+        dylib_data[LOG_HOOK_ADDR:LOG_HOOK_ADDR+4] = LOG_HOOK_PATCH
+        print(f"  [✓] 0x{LOG_CAVE_ADDR:x}: log stub 注入 ({len(LOG_CAVE_BYTES)} bytes)")
+        print(f"  [✓] 0x{LOG_HOOK_ADDR:x}: {LOG_HOOK_EXPECTED.hex()} → {LOG_HOOK_PATCH.hex()}  [fn@3afe10 → log stub]")
+        patched += 2
+
     return dylib_data, patched
 
 def process_ipa(input_path: str, output_path: str):
@@ -317,7 +383,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 14
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 16
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
