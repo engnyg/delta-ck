@@ -64,6 +64,18 @@ REGISTER_CLASS_NOP_PATCH = (0x2eb078, b'\x87\x2a\x26\x94', b'\x1f\x20\x03\xd5') 
 FN_33EA4C_RET_PATCH      = (0x33ea4c, b'\xff\x43\x03\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x33ea4c (class factory) → RET
 FN_2D0770_RET_PATCH      = (0x2d0770, b'\xe9\x23\xb9\x6d', b'\xc0\x03\x5f\xd6')  # fn@0x2d0770 (startup chain) → RET
 
+# Layer 13: Kill async dispatch_after overlay triggers + prevent ObjC class allocation
+# dispatch_after at 0x3532a0 fires BEFORE BL fn@0x2d0770 at 0x353368 — our RET patch arrives too late;
+# 0x353390 is a tail-call B→0xc756e0 in the same function (second dispatch).
+# allocateClassPair at 0x2e8a50/0x3a45a8 — class created before addMethod/registerClassPair; was never patched.
+LAYER13_PATCHES = [
+    (0x3532a0, b'\x10\x89\x24\x94', "BL 0xc756e0→nop [dispatch_after async overlay block #1]"),
+    (0x353390, b'\xd4\x88\x24\x14', "B  0xc756e0→nop [dispatch_after tail-call overlay block #2]"),
+    (0x2e8a50, b'\x05\x34\x26\x94', "BL 0xc75a64→nop [_objc_allocateClassPair class A]"),
+    (0x2c9928, b'\x6e\xaf\x26\x94', "BL 0xc756e0→nop [dispatch_after async overlay block #3]"),
+    (0x3a45a8, b'\x2f\x45\x23\x94', "BL 0xc75a64→nop [_objc_allocateClassPair class B]"),
+]
+
 NOP = b'\x1f\x20\x03\xd5'
 
 TAG      = b'By LYSTORE'          # 10 bytes
@@ -162,6 +174,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 13: NOP async dispatch_after triggers + allocateClassPair (async overlay root cause)
+    for off, expected, desc in LAYER13_PATCHES:
+        found = bytes(dylib_data[off:off+4])
+        if found == NOP:
+            print(f"  [已patch] 0x{off:x}: {desc}")
+            patched += 1
+        elif found == expected:
+            dylib_data[off:off+4] = NOP
+            print(f"  [✓] 0x{off:x}: {expected.hex()} → {NOP.hex()}  {desc}")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     # Layer 11: NOP all 6 callers of stub@0xc75680 (overlay display PLT stub)
     for off, expected, desc in LAYER11_PATCHES:
         found = bytes(dylib_data[off:off+4])
@@ -219,7 +244,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + 13  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +REGISTER_CLASS_NOP +FN33EA4C_RET +FN2D0770_RET
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + 13  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +REGISTER_CLASS_NOP +FN33EA4C_RET +FN2D0770_RET
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
