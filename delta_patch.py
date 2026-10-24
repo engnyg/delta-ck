@@ -118,6 +118,34 @@ LAYER16_PATCHES = [
 # This also enables Delta features: 0x3afe24 is the "key valid / no overlay" execution path.
 FORCE_DELTA_PATH_PATCH = (0x3afe14, b'\x80\x00\x00\xb4', b'\x04\x00\x00\x14')  # cbz x0,0x3afe24 → b 0x3afe24
 
+# Layer 19: Kill fn@0x3bc648 (the overlay controller) at entry point.
+# fn@0x3bc648 is called from fn@0x3afe10 and its body DISPLAYS the overlay UI before returning.
+# LAYER15's 3 msgSend NOPs were not sufficient — fn@0x3bc648 still shows the overlay.
+# Fix: replace its first two instructions with MOV x0,xzr + RET so it returns nil immediately
+# without executing any overlay display logic.
+# With x0=nil, fn@0x3afe10's cbz x0 branches to 0x3afe24 (Delta execution path, key-valid path).
+FN_3BC648_MOV0_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', b'\xe0\x03\x1f\xaa')  # SUB SP → MOV x0,xzr
+FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
+
+# Layer 20: stderr log stub at 0xe555e8 — write(2, "[delta] bypass OK\n", 18) when 0x3afe24 is reached
+# Hook: replace 0x3afe14 (B 0x3afe24) with BL 0xe555e8; stub logs then B 0x3afe24.
+# Stub: stp x29-x5, mov x0=#2, adrp+add x1=msg, mov x2=#18, bl _write, ldp restore, b 0x3afe24.
+LOG20_CAVE_ADDR  = 0xe555e8
+LOG20_CAVE_BYTES = bytes.fromhex(
+    'fd7bbaa9e00701a9e20f02a9e41703a9'   # stp x29,x30; stp x0,x1; stp x2,x3; stp x4,x5
+    '400080d2'                            # mov x0, #2 (stderr)
+    '0100009021a01891'                    # adrp x1; add x1,x1,#0x628  (msg)
+    '420280d2'                            # mov x2, #18 (len)
+    '4982f897'                            # bl _write @ 0xc75f2c
+    'e00741a9e20f42a9e41743a9fd7bc4a8'   # ldp x0,x1; ldp x2,x3; ldp x4,x5; ldp x29,x30
+    '026ad517'                            # b 0x3afe24
+    + '00' * 8                            # padding to offset 0x40
+    + b'[delta] bypass OK\n'.hex()        # msg (18 bytes)
+)
+LOG20_HOOK_ADDR     = 0x3afe14
+LOG20_HOOK_EXPECTED = b'\x04\x00\x00\x14'   # B 0x3afe24 (Layer 18 result)
+LOG20_HOOK_PATCH    = b'\xf5\x95\x2a\x94'   # BL 0xe555e8
+
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
 # Hooks fn@0x3afe10 entry (original: BL 0x3bc648) to call our stub first.
 # Stub: getenv("HOME") → snprintf path → fopen("a") → fprintf → fclose,
@@ -342,6 +370,48 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
     else:
         print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 19: Kill fn@0x3bc648 (overlay controller) at entry — returns nil immediately
+    for label, (off, expected, replacement) in [
+        ("fn@0x3bc648 SUB SP→MOV x0,xzr (overlay controller強制nil返回)", FN_3BC648_MOV0_PATCH),
+        ("fn@0x3bc648 STP→RET (overlay controller立即返回)", FN_3BC648_RET_PATCH),
+    ]:
+        found = bytes(dylib_data[off:off+4])
+        if found == replacement:
+            print(f"  [已patch] 0x{off:x}: {label}")
+            patched += 1
+        elif found == expected:
+            dylib_data[off:off+4] = replacement
+            print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [{label}]")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
+    # Layer 20: write(2) stderr log — writes "[delta] bypass OK\n" when 0x3afe24 is reached
+    # Cave at 0xe555e8, hook replaces B 0x3afe24 (Layer 18 result) at 0x3afe14 with BL cave.
+    off = LOG20_CAVE_ADDR
+    cave_found = bytes(dylib_data[off:off+len(LOG20_CAVE_BYTES)])
+    if cave_found == LOG20_CAVE_BYTES:
+        print(f"  [已patch] 0x{off:x}: log20 cave")
+        patched += 1
+    elif all(b == 0 for b in cave_found):
+        dylib_data[off:off+len(LOG20_CAVE_BYTES)] = LOG20_CAVE_BYTES
+        print(f"  [✓] 0x{off:x}: log20 cave 寫入 ({len(LOG20_CAVE_BYTES)} bytes)")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off:x}: cave 不是零 — IPA 版本不符")
+
+    off, expected, replacement = LOG20_HOOK_ADDR, LOG20_HOOK_EXPECTED, LOG20_HOOK_PATCH
+    found = bytes(dylib_data[off:off+4])
+    if found == replacement:
+        print(f"  [已patch] 0x{off:x}: log20 hook")
+        patched += 1
+    elif found == expected:
+        dylib_data[off:off+4] = replacement
+        print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [log20 hook B→BL cave]")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     # Layer 17: Log stub — disabled (caused crash; will be re-enabled after root cause is identified)
     # print(f"  [跳過] log stub 已停用 (v21)")
 
@@ -389,7 +459,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 15
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 19
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
