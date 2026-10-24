@@ -101,12 +101,22 @@ LAYER13_PATCHES = [
 ]
 
 # Layer 16: NOP 2 active BL _objc_msgSend calls in callees of fn@0x3bc648 (overlay chain).
-# NOTE: 0x3aaf98 (fn@3aa68c, callee of fn@3afe10) was removed — it's Delta's ObjC init,
-# not part of the overlay; NOP-ing it breaks Delta's functionality.
+# NOTE: fn@3aa68c is called from fn@3afe10 with fn@3bc648's return value as its argument.
+# fn@3bc648 (with our patches active) returns a non-nil garbage value → fn@3aa68c's msgSend
+# crashes because it receives a non-ObjC pointer. FORCE_DELTA_PATH_PATCH below bypasses
+# fn@3aa68c entirely, so these NOP patches are now dead code (fn@3bc648 never finishes init).
 LAYER16_PATCHES = [
     (0x3aebf8, b'\xa4\x1b\x23\x94', "BL _objc_msgSend→nop [fn@3ae2dc, callee of fn@3bc648]"),
     (0x3bf54c, b'\x4f\xd9\x22\x94', "BL _objc_msgSend→nop [fn@3bf4c0, tail-call from fn@3bc648]"),
 ]
+
+# Layer 18: Force fn@0x3afe10 to always take the Delta execution path (0x3afe24).
+# fn@0x3afe10 flow: BL fn@3bc648 → CBZ x0, 0x3afe24 → BL fn@3aa68c(overlay_obj) → ...
+# With our patches, fn@3bc648 still returns non-nil (its input x0), so CBZ is not taken
+# and fn@3aa68c is called with a non-valid ObjC object → crash.
+# Fix: change CBZ x0 → unconditional B, permanently skipping fn@3aa68c.
+# This also enables Delta features: 0x3afe24 is the "key valid / no overlay" execution path.
+FORCE_DELTA_PATH_PATCH = (0x3afe14, b'\x80\x00\x00\xb4', b'\x04\x00\x00\x14')  # cbz x0,0x3afe24 → b 0x3afe24
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
 # Hooks fn@0x3afe10 entry (original: BL 0x3bc648) to call our stub first.
@@ -319,6 +329,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 18: Force Delta execution path — CBZ x0 → unconditional B (bypasses fn@3aa68c crash)
+    off, expected, replacement = FORCE_DELTA_PATH_PATCH
+    found = bytes(dylib_data[off:off+4])
+    if found == replacement:
+        print(f"  [已patch] 0x{off:x}: force-Delta-path")
+        patched += 1
+    elif found == expected:
+        dylib_data[off:off+4] = replacement
+        print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [fn@0x3afe10 CBZ→B (強制走Delta執行路徑)]")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     # Layer 17: Log stub — disabled (caused crash; will be re-enabled after root cause is identified)
     # print(f"  [跳過] log stub 已停用 (v21)")
 
@@ -366,7 +389,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 14
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 15
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
