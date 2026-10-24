@@ -100,13 +100,12 @@ LAYER13_PATCHES = [
     (0x3a45a8, b'\x2f\x45\x23\x94', "BL 0xc75a64→nop [_objc_allocateClassPair class B]"),
 ]
 
-# Layer 16: NOP the 3 active BL _objc_msgSend calls reachable through fn@0x3afe10
-# that survived v18 (fn@0x3bc648's 3 msgSend were NOP'd but these callee/sibling
-# functions still carried active msgSend calls showing the overlay).
+# Layer 16: NOP 2 active BL _objc_msgSend calls in callees of fn@0x3bc648 (overlay chain).
+# NOTE: 0x3aaf98 (fn@3aa68c, callee of fn@3afe10) was removed — it's Delta's ObjC init,
+# not part of the overlay; NOP-ing it breaks Delta's functionality.
 LAYER16_PATCHES = [
     (0x3aebf8, b'\xa4\x1b\x23\x94', "BL _objc_msgSend→nop [fn@3ae2dc, callee of fn@3bc648]"),
     (0x3bf54c, b'\x4f\xd9\x22\x94', "BL _objc_msgSend→nop [fn@3bf4c0, tail-call from fn@3bc648]"),
-    (0x3aaf98, b'\xbc\x2a\x23\x94', "BL _objc_msgSend→nop [fn@3aa68c, callee of fn@3afe10]"),
 ]
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
@@ -320,26 +319,8 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
-    # Layer 17: Inject runtime log stub into code cave at 0xe555e8
-    # Hook fn@0x3afe10 first instruction to call stub; stub logs to Documents/delta_log.txt
-    cave_off = LOG_CAVE_ADDR
-    cave_end = LOG_CAVE_ADDR + len(LOG_CAVE_BYTES)
-    cave_area = bytes(dylib_data[cave_off:cave_end])
-    hook_found = bytes(dylib_data[LOG_HOOK_ADDR:LOG_HOOK_ADDR+4])
-    if cave_area == LOG_CAVE_BYTES and hook_found == LOG_HOOK_PATCH:
-        print(f"  [已patch] 0x{LOG_CAVE_ADDR:x}: log stub (cave已注入)")
-        print(f"  [已patch] 0x{LOG_HOOK_ADDR:x}: log stub hook")
-        patched += 2
-    elif cave_area != bytes(len(LOG_CAVE_BYTES)):
-        print(f"  [跳過] 0x{LOG_CAVE_ADDR:x}: cave 非全零，跳過 log stub 注入")
-    elif hook_found != LOG_HOOK_EXPECTED:
-        print(f"  [跳過] 0x{LOG_HOOK_ADDR:x}: hook 點預期 {LOG_HOOK_EXPECTED.hex()} 但找到 {hook_found.hex()}")
-    else:
-        dylib_data[cave_off:cave_end] = LOG_CAVE_BYTES
-        dylib_data[LOG_HOOK_ADDR:LOG_HOOK_ADDR+4] = LOG_HOOK_PATCH
-        print(f"  [✓] 0x{LOG_CAVE_ADDR:x}: log stub 注入 ({len(LOG_CAVE_BYTES)} bytes)")
-        print(f"  [✓] 0x{LOG_HOOK_ADDR:x}: {LOG_HOOK_EXPECTED.hex()} → {LOG_HOOK_PATCH.hex()}  [fn@3afe10 → log stub]")
-        patched += 2
+    # Layer 17: Log stub — disabled (caused crash; will be re-enabled after root cause is identified)
+    # print(f"  [跳過] log stub 已停用 (v21)")
 
     return dylib_data, patched
 
@@ -385,7 +366,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 16
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 14
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
