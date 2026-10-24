@@ -46,6 +46,13 @@ FN_33B3A4_MOV0_PATCH = (0x33b3a4, b'\xff\x43\x02\xd1', b'\xe0\x03\x1f\xaa')  # S
 FN_33B3A4_RET_PATCH  = (0x33b3a8, b'\xf4\x4f\x07\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
 # Layer 10: overlay update function bypass (called from startup 0x2d07dc; safety guard)
 SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x3a4ed4 → RET (overlay update)
+# Layer 15: fn@0x3bc648 (main overlay display fn — has keychain check + 3 msgSend calls)
+# Called synchronously from 0x3afe10 in fn@0x3afde0. MISSED in v16 — entry point never patched.
+# Same stack frame size as fn@0x3a20ac (ff4305d1 = SUB sp,sp,#0x540). 1 active caller.
+OVERLAY_MAIN_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x3bc648 → RET
+# Layer 15b: NOP remaining active _objc_registerClassPair at 0x3a4ea4
+# (allocateClassPair already NOP'd; this prevents any class object from being finalized)
+REGISTER_CLASS_NOP2_PATCH = (0x3a4ea4, b'\xfc\x42\x23\x94', b'\x1f\x20\x03\xd5')  # BL registerClassPair → NOP
 # Layer 11: NOP calls to stub@0xc75680 (_class_addMethod) — prevents dynamic ObjC method registration
 # that would build the overlay class's method table.
 LAYER11_PATCHES = [
@@ -171,7 +178,9 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         ("fn@0x33b3a4 SUB SP→MOV x0,0 (啟動overlay init強制null返回)", FN_33B3A4_MOV0_PATCH),
         ("fn@0x33b3a4 STP→RET (啟動overlay init立即返回)", FN_33B3A4_RET_PATCH),
         ("fn@0x3a4ed4 → RET (overlay更新函數繞過)", SHOW_OVERLAY4_PATCH),
+        ("fn@0x3bc648 → RET (主overlay顯示函數 — v16漏補)", OVERLAY_MAIN_PATCH),
         ("0x2eb078 _objc_registerClassPair→NOP (阻止overlay ObjC class註冊)", REGISTER_CLASS_NOP_PATCH),
+        ("0x3a4ea4 _objc_registerClassPair→NOP (剩餘active registerClassPair)", REGISTER_CLASS_NOP2_PATCH),
         ("fn@0x33ea4c → RET (class factory徹底阻斷)", FN_33EA4C_RET_PATCH),
         ("fn@0x2d0770 → RET (啟動overlay init chain根部阻斷)", FN_2D0770_RET_PATCH),
     ]:
@@ -269,7 +278,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + 13  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +REGISTER_CLASS_NOP +FN33EA4C_RET +FN2D0770_RET
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + 15  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +OVERLAY_MAIN +REGISTER_CLASS_NOP +REGISTER_CLASS_NOP2 +FN33EA4C_RET +FN2D0770_RET
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
