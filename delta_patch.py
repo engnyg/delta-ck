@@ -64,6 +64,18 @@ REGISTER_CLASS_NOP_PATCH = (0x2eb078, b'\x87\x2a\x26\x94', b'\x1f\x20\x03\xd5') 
 FN_33EA4C_RET_PATCH      = (0x33ea4c, b'\xff\x43\x03\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x33ea4c (class factory) → RET
 FN_2D0770_RET_PATCH      = (0x2d0770, b'\xe9\x23\xb9\x6d', b'\xc0\x03\x5f\xd6')  # fn@0x2d0770 (startup chain) → RET
 
+# Layer 14: Kill fn@0x38e274 (key_val_show) entirely — both callers ignore return value.
+# Also kill 4th dispatch_after (HTTP callback tail-call) + both dispatch_async block submitters.
+# fn@0x38e274 is a monster function; making it RET immediately is cleaner than patching internals.
+LAYER14_PATCHES = [
+    (0x38e274, b'\xfc\x6f\xba\xa9', b'\xc0\x03\x5f\xd6'),  # fn@0x38e274 (key_val_show) → RET
+    (0x362dfc, b'\x39\x4a\x24\x14', b'\x1f\x20\x03\xd5'),  # B→dispatch_after in HTTP callback (4th)
+    (0x3afdd0, b'\x47\x16\x23\x94', b'\x1f\x20\x03\xd5'),  # BL dispatch_async block #1
+    (0x3bc5c4, b'\x4a\xe4\x22\x94', b'\x1f\x20\x03\xd5'),  # BL dispatch_async block #2
+    (0x38e344, b'\x15\x02\x00\x14', b'\x1f\x20\x03\xd5'),  # B→0x38eb98 (defensive, dead code)
+    (0x38e3c8, b'\x65\x3e\x00\x35', b'\x1f\x20\x03\xd5'),  # CBNZ w5→0x38eb94 (defensive)
+]
+
 # Layer 13: Kill async dispatch_after overlay triggers + prevent ObjC class allocation
 # dispatch_after at 0x3532a0 fires BEFORE BL fn@0x2d0770 at 0x353368 — our RET patch arrives too late;
 # 0x353390 is a tail-call B→0xc756e0 in the same function (second dispatch).
@@ -187,6 +199,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 14: Kill fn@0x38e274 entirely + 4th dispatch_after + both dispatch_async submitters
+    for off, expected, replacement in LAYER14_PATCHES:
+        found = bytes(dylib_data[off:off+4])
+        if found == replacement:
+            print(f"  [已patch] 0x{off:x}: layer14")
+            patched += 1
+        elif found == expected:
+            dylib_data[off:off+4] = replacement
+            print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [layer14]")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     # Layer 11: NOP all 6 callers of stub@0xc75680 (overlay display PLT stub)
     for off, expected, desc in LAYER11_PATCHES:
         found = bytes(dylib_data[off:off+4])
@@ -244,7 +269,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + 13  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +REGISTER_CLASS_NOP +FN33EA4C_RET +FN2D0770_RET
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + 13  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +REGISTER_CLASS_NOP +FN33EA4C_RET +FN2D0770_RET
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
