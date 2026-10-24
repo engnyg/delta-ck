@@ -171,8 +171,10 @@ def stamp_dylib(dylib_data: bytearray):
 def stamp_plist(plist_data: bytes) -> bytes:
     """Set CFBundleDisplayName to 'Delta | By LYSTORE' (visible under app icon)."""
     pl = plistlib.loads(plist_data)
-    pl['CFBundleDisplayName'] = DISPLAY_NAME
-    pl['CFBundleName']        = DISPLAY_NAME
+    pl['CFBundleDisplayName']              = DISPLAY_NAME
+    pl['CFBundleName']                     = DISPLAY_NAME
+    pl['UIFileSharingEnabled']             = True   # 讓「檔案」app 看到 Documents 資料夾
+    pl['LSSupportsOpeningDocumentsInPlace'] = True
     return plistlib.dumps(pl, fmt=plistlib.FMT_BINARY)
 
 def patch_dylib(dylib_data: bytearray) -> bytearray:
