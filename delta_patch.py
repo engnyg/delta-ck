@@ -100,6 +100,15 @@ LAYER13_PATCHES = [
     (0x3a45a8, b'\x2f\x45\x23\x94', "BL 0xc75a64→nop [_objc_allocateClassPair class B]"),
 ]
 
+# Layer 16: NOP the 3 active BL _objc_msgSend calls reachable through fn@0x3afe10
+# that survived v18 (fn@0x3bc648's 3 msgSend were NOP'd but these callee/sibling
+# functions still carried active msgSend calls showing the overlay).
+LAYER16_PATCHES = [
+    (0x3aebf8, b'\xa4\x1b\x23\x94', "BL _objc_msgSend→nop [fn@3ae2dc, callee of fn@3bc648]"),
+    (0x3bf54c, b'\x4f\xd9\x22\x94', "BL _objc_msgSend→nop [fn@3bf4c0, tail-call from fn@3bc648]"),
+    (0x3aaf98, b'\xbc\x2a\x23\x94', "BL _objc_msgSend→nop [fn@3aa68c, callee of fn@3afe10]"),
+]
+
 NOP = b'\x1f\x20\x03\xd5'
 
 TAG      = b'By LYSTORE'          # 10 bytes
@@ -238,6 +247,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 16: NOP 3 active msgSend calls in callees of fn@0x3bc648/fn@0x3afe10
+    for off, expected, desc in LAYER16_PATCHES:
+        found = bytes(dylib_data[off:off+4])
+        if found == NOP:
+            print(f"  [已patch] 0x{off:x}: {desc}")
+            patched += 1
+        elif found == expected:
+            dylib_data[off:off+4] = NOP
+            print(f"  [✓] 0x{off:x}: {expected.hex()} → {NOP.hex()}  {desc}")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     # Layer 11: NOP all 6 callers of stub@0xc75680 (overlay display PLT stub)
     for off, expected, desc in LAYER11_PATCHES:
         found = bytes(dylib_data[off:off+4])
@@ -295,7 +317,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + 14  # +OVERLAY +LAYER3 +INGAME_VALID +SHOW_OVERLAY2 +LAYER6 +BLR_NOP +CBZ_OVERLAY +FN33B3A4_MOV0 +FN33B3A4_RET +SHOW_OVERLAY4 +REGISTER_CLASS_NOP +REGISTER_CLASS_NOP2 +FN33EA4C_RET +FN2D0770_RET
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 14
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
