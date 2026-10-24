@@ -6,6 +6,69 @@ Delta IPA Key Bypass Patcher
 
 import sys, os, shutil, struct, zipfile, tempfile, argparse, plistlib
 
+# ─── ARM64 instruction encoders ───────────────────────────────────────────
+def _bl(src, tgt):
+    off = (tgt - src) >> 2
+    return struct.pack('<I', 0x94000000 | (off & 0x3FFFFFF))
+
+def _b(src, tgt):
+    off = (tgt - src) >> 2
+    return struct.pack('<I', 0x14000000 | (off & 0x3FFFFFF))
+
+def _cbz(src, tgt, rt):
+    off = (tgt - src) >> 2
+    return struct.pack('<I', 0xB4000000 | ((off & 0x7FFFF) << 5) | rt)
+
+def _beq(src, tgt):
+    off = (tgt - src) >> 2
+    return struct.pack('<I', 0x54000000 | ((off & 0x7FFFF) << 5))
+
+def _adrp(pc, tgt, rd):
+    page_diff = (tgt >> 12) - (pc >> 12)
+    immlo = page_diff & 3
+    immhi = (page_diff >> 2) & 0x7FFFF
+    return struct.pack('<I', 0x90000000 | (immlo << 29) | (immhi << 5) | rd)
+
+def _add_imm(rd, rn, imm12):
+    return struct.pack('<I', 0x91000000 | (imm12 << 10) | (rn << 5) | rd)
+
+def _sub_sp(imm12):
+    return struct.pack('<I', 0xD1000000 | (imm12 << 10) | (31 << 5) | 31)
+
+def _add_sp(imm12):
+    return struct.pack('<I', 0x91000000 | (imm12 << 10) | (31 << 5) | 31)
+
+def _movz(rd, imm16):
+    return struct.pack('<I', 0xD2800000 | (imm16 << 5) | rd)
+
+def _mov_reg(rd, rm):
+    return struct.pack('<I', 0xAA000000 | (rm << 16) | (31 << 5) | rd)
+
+def _stp_pre(rt1, rt2, rn, off):
+    simm7 = (off // 8) & 0x7F
+    return struct.pack('<I', 0xA9800000 | (simm7 << 15) | (rt2 << 10) | (rn << 5) | rt1)
+
+def _stp_off(rt1, rt2, rn, off):
+    simm7 = (off // 8) & 0x7F
+    return struct.pack('<I', 0xA9000000 | (simm7 << 15) | (rt2 << 10) | (rn << 5) | rt1)
+
+def _ldp_off(rt1, rt2, rn, off):
+    simm7 = (off // 8) & 0x7F
+    return struct.pack('<I', 0xA9400000 | (simm7 << 15) | (rt2 << 10) | (rn << 5) | rt1)
+
+def _ldp_post(rt1, rt2, rn, off):
+    simm7 = (off // 8) & 0x7F
+    return struct.pack('<I', 0xA8C00000 | (simm7 << 15) | (rt2 << 10) | (rn << 5) | rt1)
+
+def _cmn_w0_1():
+    return struct.pack('<I', 0x3100041F)
+
+def _ret():
+    return struct.pack('<I', 0xD65F03C0)
+
+def _add_x0_sp_0():
+    return struct.pack('<I', 0x910003E0)  # add x0,sp,#0
+
 DYLIB_PATH = "Payload/Roblox.app/libgloop.dylib"
 
 PATCHES = [
@@ -127,24 +190,116 @@ FORCE_DELTA_PATH_PATCH = (0x3afe14, b'\x80\x00\x00\xb4', b'\x04\x00\x00\x14')  #
 FN_3BC648_MOV0_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', b'\xe0\x03\x1f\xaa')  # SUB SP → MOV x0,xzr
 FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
 
-# Layer 20: stderr log stub at 0xe555e8 — write(2, "[delta] bypass OK\n", 18) when 0x3afe24 is reached
-# Hook: replace 0x3afe14 (B 0x3afe24) with BL 0xe555e8; stub logs then B 0x3afe24.
-# Stub: stp x29-x5, mov x0=#2, adrp+add x1=msg, mov x2=#18, bl _write, ldp restore, b 0x3afe24.
-LOG20_CAVE_ADDR  = 0xe555e8
-LOG20_CAVE_BYTES = bytes.fromhex(
-    'fd7bbaa9e00701a9e20f02a9e41703a9'   # stp x29,x30; stp x0,x1; stp x2,x3; stp x4,x5
-    '400080d2'                            # mov x0, #2 (stderr)
-    '0100009021a01891'                    # adrp x1; add x1,x1,#0x628  (msg)
-    '420280d2'                            # mov x2, #18 (len)
-    '4982f897'                            # bl _write @ 0xc75f2c
-    'e00741a9e20f42a9e41743a9fd7bc4a8'   # ldp x0,x1; ldp x2,x3; ldp x4,x5; ldp x29,x30
-    '026ad517'                            # b 0x3afe24
-    + '00' * 8                            # padding to offset 0x40
-    + b'[delta] bypass OK\n'.hex()        # msg (18 bytes)
-)
+# Layer 20 + 21: stderr log + Documents file log
+# Cave at 0xe555e8 (96 bytes):
+#   stp/stp/stp/stp registers, write(2,msg,18), reload msg, bl log_to_docs, ldp/ldp/ldp/ldp, b 0x3afe24
+#   msg "[delta] bypass OK\n" at cave+0x48, zeros to cave+0x60
+# Layer 21: log_to_docs subroutine at 0xe55648 (172 bytes):
+#   getenv("HOME") → snprintf(path,128,"%s/Documents/delta_log.txt",home) → open/write/close
+#   Strings at sub+0x88: "HOME\0\0\0\0", "%s/Documents/delta_log.txt\0"
+LOG20_CAVE_ADDR     = 0xe555e8
+LOG21_SUBROUTINE_ADDR = 0xe55648   # cave_base + 0x60 (96 bytes into cave)
 LOG20_HOOK_ADDR     = 0x3afe14
 LOG20_HOOK_EXPECTED = b'\x04\x00\x00\x14'   # B 0x3afe24 (Layer 18 result)
 LOG20_HOOK_PATCH    = b'\xf5\x95\x2a\x94'   # BL 0xe555e8
+
+# PLT stubs in libgloop.dylib
+_PLT_WRITE    = 0xc75f2c
+_PLT_GETENV   = 0xc758c0
+_PLT_SNPRINTF = 0xc75d70
+_PLT_OPEN     = 0xc75aac
+_PLT_CLOSE    = 0xc75698
+
+MSG21 = b'[delta] bypass OK\n'   # 18 bytes
+
+def build_log20_cave(cave_base, log21_addr):
+    """Cave at cave_base: write(2,msg,18), call log_to_docs(x1=msg,x2=18), restore, b 0x3afe24.
+    Total: 18 instructions (0x48 bytes) + 18-byte msg + 6-byte pad = 96 bytes."""
+    msg_addr = cave_base + 0x48
+    i = []
+    pc = cave_base
+    def emit(b): nonlocal pc; i.append(b); pc += 4
+
+    emit(_stp_pre(29, 30, 31, -0x60))            # stp x29,x30,[sp,#-0x60]!
+    emit(_stp_off(0, 1, 31, 0x10))               # stp x0,x1,[sp,#0x10]
+    emit(_stp_off(2, 3, 31, 0x20))               # stp x2,x3,[sp,#0x20]
+    emit(_stp_off(4, 5, 31, 0x30))               # stp x4,x5,[sp,#0x30]
+    emit(_movz(0, 2))                             # mov x0,#2 (stderr)
+    emit(_adrp(pc, msg_addr, 1))                  # adrp x1, msg_page
+    emit(_add_imm(1, 1, msg_addr & 0xFFF))        # add x1,x1,#msg_off
+    emit(_movz(2, len(MSG21)))                    # mov x2,#18
+    emit(_bl(pc, _PLT_WRITE))                     # bl _write
+    emit(_adrp(pc, msg_addr, 1))                  # adrp x1, msg_page  (reload)
+    emit(_add_imm(1, 1, msg_addr & 0xFFF))        # add x1,x1,#msg_off
+    emit(_movz(2, len(MSG21)))                    # mov x2,#18
+    emit(_bl(pc, log21_addr))                     # bl log_to_docs
+    emit(_ldp_off(0, 1, 31, 0x10))               # ldp x0,x1,[sp,#0x10]
+    emit(_ldp_off(2, 3, 31, 0x20))               # ldp x2,x3,[sp,#0x20]
+    emit(_ldp_off(4, 5, 31, 0x30))               # ldp x4,x5,[sp,#0x30]
+    emit(_ldp_post(29, 30, 31, 0x60))            # ldp x29,x30,[sp],#0x60
+    emit(_b(pc, 0x3afe24))                        # b 0x3afe24
+
+    assert pc == cave_base + 0x48, f"cave instr end at {pc:#x} expected {cave_base+0x48:#x}"
+    code = b''.join(i) + MSG21 + b'\x00' * 6     # 72+18+6 = 96 bytes = 0x60
+    assert len(code) == 0x60
+    return code
+
+def build_log21_subroutine(base):
+    """log_to_docs(x1=msg_ptr, x2=msg_len):
+    Appends message to $HOME/Documents/delta_log.txt.
+    Saves/restores x19-x22, x29, x30. Total: 172 bytes."""
+    # String data at base+0x88
+    home_addr = base + 0x88
+    fmt_addr  = base + 0x90
+    log_ret   = base + 0x74   # 29 instructions * 4 = 0x74
+
+    i = []
+    pc = base
+    def emit(b): nonlocal pc; i.append(b); pc += 4
+
+    emit(_sub_sp(0xb0))                           # sub sp,sp,#0xb0
+    emit(_stp_off(19, 20, 31, 0x80))              # stp x19,x20,[sp,#0x80]
+    emit(_stp_off(21, 22, 31, 0x90))              # stp x21,x22,[sp,#0x90]
+    emit(_stp_off(29, 30, 31, 0xa0))              # stp x29,x30,[sp,#0xa0]
+    emit(_mov_reg(19, 1))                         # mov x19,x1  (msg_ptr)
+    emit(_mov_reg(20, 2))                         # mov x20,x2  (msg_len)
+    emit(_adrp(pc, home_addr, 0))                 # adrp x0, home_page
+    emit(_add_imm(0, 0, home_addr & 0xFFF))       # add x0,x0,#home_off
+    emit(_bl(pc, _PLT_GETENV))                    # bl _getenv
+    emit(_cbz(pc, log_ret, 0))                    # cbz x0, log_ret
+    emit(_mov_reg(21, 0))                         # mov x21,x0  (home ptr)
+    emit(_add_x0_sp_0())                          # add x0,sp,#0  (pathbuf)
+    emit(_movz(1, 128))                           # movz x1,#128
+    emit(_adrp(pc, fmt_addr, 2))                  # adrp x2, fmt_page
+    emit(_add_imm(2, 2, fmt_addr & 0xFFF))        # add x2,x2,#fmt_off
+    emit(_mov_reg(3, 21))                         # mov x3,x21  (home)
+    emit(_bl(pc, _PLT_SNPRINTF))                  # bl _snprintf
+    emit(_add_x0_sp_0())                          # add x0,sp,#0  (path)
+    emit(_movz(1, 0x209))                         # movz x1,#0x209 (O_WRONLY|O_CREAT|O_APPEND)
+    emit(_movz(2, 0x1a4))                         # movz x2,#0644
+    emit(_bl(pc, _PLT_OPEN))                      # bl _open
+    emit(_cmn_w0_1())                             # cmn w0,#1
+    emit(_beq(pc, log_ret))                       # b.eq log_ret
+    emit(_mov_reg(22, 0))                         # mov x22,x0  (fd)
+    emit(_mov_reg(1, 19))                         # mov x1,x19  (msg)
+    emit(_mov_reg(2, 20))                         # mov x2,x20  (len)
+    emit(_bl(pc, _PLT_WRITE))                     # bl _write  (x0=fd from above)
+    emit(_mov_reg(0, 22))                         # mov x0,x22  (fd)
+    emit(_bl(pc, _PLT_CLOSE))                     # bl _close
+    # log_ret:
+    assert pc == log_ret, f"log_ret at {pc:#x} expected {log_ret:#x}"
+    emit(_ldp_off(29, 30, 31, 0xa0))              # ldp x29,x30,[sp,#0xa0]
+    emit(_ldp_off(21, 22, 31, 0x90))              # ldp x21,x22,[sp,#0x90]
+    emit(_ldp_off(19, 20, 31, 0x80))              # ldp x19,x20,[sp,#0x80]
+    emit(_add_sp(0xb0))                           # add sp,sp,#0xb0
+    emit(_ret())                                  # ret
+    # Strings:
+    assert pc == base + 0x88, f"strings at {pc:#x} expected {base+0x88:#x}"
+
+    code = b''.join(i)
+    code += b'HOME\x00\x00\x00\x00'               # 8 bytes at +0x88
+    code += b'%s/Documents/delta_log.txt\x00'     # 27+1=28 bytes at +0x90
+    return code                                   # total 0x88+8+28 = 0xAC = 172 bytes
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
 # Hooks fn@0x3afe10 entry (original: BL 0x3bc648) to call our stub first.
@@ -386,20 +541,38 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
-    # Layer 20: write(2) stderr log — writes "[delta] bypass OK\n" when 0x3afe24 is reached
-    # Cave at 0xe555e8, hook replaces B 0x3afe24 (Layer 18 result) at 0x3afe14 with BL cave.
-    off = LOG20_CAVE_ADDR
-    cave_found = bytes(dylib_data[off:off+len(LOG20_CAVE_BYTES)])
-    if cave_found == LOG20_CAVE_BYTES:
-        print(f"  [已patch] 0x{off:x}: log20 cave")
+    # Layer 20+21: stderr + Documents file logger
+    # Build cave and subroutine bytes now (PC-relative encodings depend on base addresses)
+    cave_bytes = build_log20_cave(LOG20_CAVE_ADDR, LOG21_SUBROUTINE_ADDR)
+    sub_bytes  = build_log21_subroutine(LOG21_SUBROUTINE_ADDR)
+
+    # Layer 21: write log_to_docs subroutine at 0xe55648
+    off21 = LOG21_SUBROUTINE_ADDR
+    sub_found = bytes(dylib_data[off21:off21+len(sub_bytes)])
+    if sub_found == sub_bytes:
+        print(f"  [已patch] 0x{off21:x}: log21 subroutine")
         patched += 1
-    elif all(b == 0 for b in cave_found):
-        dylib_data[off:off+len(LOG20_CAVE_BYTES)] = LOG20_CAVE_BYTES
-        print(f"  [✓] 0x{off:x}: log20 cave 寫入 ({len(LOG20_CAVE_BYTES)} bytes)")
+    elif all(b == 0 for b in sub_found):
+        dylib_data[off21:off21+len(sub_bytes)] = sub_bytes
+        print(f"  [✓] 0x{off21:x}: log21 subroutine 寫入 ({len(sub_bytes)} bytes)")
         patched += 1
     else:
-        print(f"  [跳過] 0x{off:x}: cave 不是零 — IPA 版本不符")
+        print(f"  [跳過] 0x{off21:x}: subroutine cave 不是零 — IPA 版本不符")
 
+    # Layer 20: write cave at 0xe555e8 (stderr + call log_to_docs)
+    off20 = LOG20_CAVE_ADDR
+    cave_found = bytes(dylib_data[off20:off20+len(cave_bytes)])
+    if cave_found == cave_bytes:
+        print(f"  [已patch] 0x{off20:x}: log20 cave")
+        patched += 1
+    elif all(b == 0 for b in cave_found):
+        dylib_data[off20:off20+len(cave_bytes)] = cave_bytes
+        print(f"  [✓] 0x{off20:x}: log20 cave 寫入 ({len(cave_bytes)} bytes)")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off20:x}: cave 不是零 — IPA 版本不符")
+
+    # Hook: replace B 0x3afe24 at 0x3afe14 with BL cave (共用)
     off, expected, replacement = LOG20_HOOK_ADDR, LOG20_HOOK_EXPECTED, LOG20_HOOK_PATCH
     found = bytes(dylib_data[off:off+4])
     if found == replacement:
@@ -407,13 +580,10 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         patched += 1
     elif found == expected:
         dylib_data[off:off+4] = replacement
-        print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [log20 hook B→BL cave]")
+        print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [log20/21 hook B→BL cave]")
         patched += 1
     else:
         print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
-
-    # Layer 17: Log stub — disabled (caused crash; will be re-enabled after root cause is identified)
-    # print(f"  [跳過] log stub 已停用 (v21)")
 
     return dylib_data, patched
 
@@ -459,7 +629,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 19
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 20
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
