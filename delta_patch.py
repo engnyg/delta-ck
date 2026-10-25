@@ -127,10 +127,10 @@ PATCHES = [
 ]
 
 # Special patches: non-NOP replacements
-OVERLAY_PATCH      = (0x3a20ac, b'\xff\x43\x05\xd1', _bl(0x3a20ac, PROBE_C_ADDR))  # show overlay fn → probe C
+OVERLAY_PATCH      = (0x3a20ac, b'\xff\x43\x05\xd1', _b(0x3a20ac, PROBE_C_ADDR))   # show overlay fn → probe C
 LAYER3_PATCH       = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')   # tbnz → b valid path
 INGAME_VALID_PATCH = (0x1c2b48, b'\xa0\x01\x00\x36', b'\x0d\x00\x00\x14')   # tbz → b 0x1c2b7c (always good path)
-SHOW_OVERLAY2_PATCH = (0x1b2960, b'\xf4\x4f\xbe\xa9', _bl(0x1b2960, PROBE_D_ADDR)) # fn@0x1b2960 → probe D
+SHOW_OVERLAY2_PATCH = (0x1b2960, b'\xf4\x4f\xbe\xa9', _b(0x1b2960, PROBE_D_ADDR))  # fn@0x1b2960 → probe D
 # Layer 6: startup overlay bypass — force fn@0x38e274 to always jump to key-processing code,
 # skipping the "no cached key" path (0x38eb98) that shows the overlay at startup
 LAYER6_PATCH       = (0x38e2f0, b'\xe0\x51\x02\x54', b'\x8f\x12\x00\x14')  # b.eq → b (always → 0x392d2c, bypasses startup overlay)
@@ -144,7 +144,7 @@ CBZ_OVERLAY_PATCH  = (0x397868, b'\x73\xe7\x02\xb4', b'\x3b\x17\x00\x14')  # CBZ
 FN_33B3A4_MOV0_PATCH = (0x33b3a4, b'\xff\x43\x02\xd1', b'\xe0\x03\x1f\xaa')  # SUB SP → MOV x0,#0
 FN_33B3A4_RET_PATCH  = (0x33b3a8, b'\xf4\x4f\x07\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
 # Layer 10: overlay update function bypass (called from startup 0x2d07dc; safety guard)
-SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', _bl(0x3a4ed4, PROBE_E_ADDR))  # fn@0x3a4ed4 → probe E
+SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', _b(0x3a4ed4, PROBE_E_ADDR))   # fn@0x3a4ed4 → probe E
 # Layer 15: NOP the 3 BL _objc_msgSend calls inside fn@0x3bc648 that present overlay UI.
 # Killing fn@0x3bc648 entirely causes crash (function also does init work).
 # These 3 calls are the only UI-display side effects; NOP-ing them suppresses the overlay
@@ -173,13 +173,13 @@ LAYER11_PATCHES = [
 # And fn@0x2d0770 → RET to kill the entire startup overlay init chain at its root.
 REGISTER_CLASS_NOP_PATCH = (0x2eb078, b'\x87\x2a\x26\x94', b'\x1f\x20\x03\xd5')  # BL _objc_registerClassPair → NOP
 FN_33EA4C_RET_PATCH      = (0x33ea4c, b'\xff\x43\x03\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x33ea4c (class factory) → RET
-FN_2D0770_RET_PATCH      = (0x2d0770, b'\xe9\x23\xb9\x6d', _bl(0x2d0770, PROBE_F_ADDR))  # fn@0x2d0770 → probe F
+FN_2D0770_RET_PATCH      = (0x2d0770, b'\xe9\x23\xb9\x6d', _b(0x2d0770, PROBE_F_ADDR))   # fn@0x2d0770 → probe F
 
 # Layer 14: Kill fn@0x38e274 (key_val_show) entirely — both callers ignore return value.
 # Also kill 4th dispatch_after (HTTP callback tail-call) + both dispatch_async block submitters.
 # fn@0x38e274 is a monster function; making it RET immediately is cleaner than patching internals.
 LAYER14_PATCHES = [
-    (0x38e274, b'\xfc\x6f\xba\xa9', _bl(0x38e274, PROBE_A_ADDR)),  # fn@0x38e274 → probe A
+    (0x38e274, b'\xfc\x6f\xba\xa9', _b(0x38e274, PROBE_A_ADDR)),   # fn@0x38e274 → probe A
     (0x362dfc, b'\x39\x4a\x24\x14', b'\x1f\x20\x03\xd5'),  # B→dispatch_after in HTTP callback (4th)
     (0x3afdd0, b'\x47\x16\x23\x94', b'\x1f\x20\x03\xd5'),  # BL dispatch_async block #1
     (0x3bc5c4, b'\x4a\xe4\x22\x94', b'\x1f\x20\x03\xd5'),  # BL dispatch_async block #2
@@ -223,7 +223,7 @@ FORCE_DELTA_PATH_PATCH = (0x3afe14, b'\x80\x00\x00\xb4', b'\x04\x00\x00\x14')  #
 # Fix: replace its first two instructions with MOV x0,xzr + RET so it returns nil immediately
 # without executing any overlay display logic.
 # With x0=nil, fn@0x3afe10's cbz x0 branches to 0x3afe24 (Delta execution path, key-valid path).
-FN_3BC648_MOV0_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', _bl(0x3bc648, PROBE_B_ADDR))  # SUB SP → BL probe B
+FN_3BC648_MOV0_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', _b(0x3bc648, PROBE_B_ADDR))   # SUB SP → B probe B
 FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET (after probe returns)
 
 # Layer 20 + 21: stderr log + Documents file log
