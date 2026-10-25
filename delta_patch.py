@@ -71,6 +71,42 @@ def _add_x0_sp_0():
 
 DYLIB_PATH = "Payload/Roblox.app/libgloop.dylib"
 
+def build_probe_stub(base, log21_addr, msg: bytes, ret_nil=False):
+    """Probe stub: saves x0-x3/x29/x30, calls log21(x1=msg,x2=len), restores, optional MOV x0,0, RET.
+    msg must be <= 16 bytes. Returns bytes; size = (13 or 14)*4 + 8."""
+    assert len(msg) <= 16
+    msg_padded = (msg + b'\x00' * 8)[:8]   # pad/truncate to 8 bytes
+    instr_count = 14 if ret_nil else 13
+    msg_start = base + instr_count * 4
+    i = []
+    pc = base
+    def emit(b): nonlocal pc; i.append(b); pc += 4
+    emit(_sub_sp(0x30))
+    emit(_stp_off(0, 1, 31, 0x20))
+    emit(_stp_off(2, 3, 31, 0x10))
+    emit(_stp_off(29, 30, 31, 0x00))
+    emit(_adrp(pc, msg_start, 1))
+    emit(_add_imm(1, 1, msg_start & 0xFFF))
+    emit(_movz(2, len(msg)))
+    emit(_bl(pc, log21_addr))
+    emit(_ldp_off(29, 30, 31, 0x00))
+    emit(_ldp_off(2, 3, 31, 0x10))
+    emit(_ldp_off(0, 1, 31, 0x20))
+    emit(_add_sp(0x30))
+    if ret_nil:
+        emit(_movz(0, 0))
+    emit(_ret())
+    assert pc == msg_start
+    return bytes(b''.join(i)) + msg_padded
+
+# Debug probe cave addresses (in zero-filled gap after log21 at 0xe556f4..0xe58000)
+PROBE_A_ADDR = 0xe556f4   # fn@38e274 → log "A38e274\n" → RET
+PROBE_B_ADDR = 0xe55730   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
+PROBE_C_ADDR = 0xe55770   # fn@3a20ac → log "C3a20ac\n" → RET
+PROBE_D_ADDR = 0xe557ac   # fn@1b2960 → log "D1b2960\n" → RET
+PROBE_E_ADDR = 0xe557e8   # fn@3a4ed4 → log "E3a4ed4\n" → RET
+PROBE_F_ADDR = 0xe55824   # fn@2d0770 → log "F2d0770\n" → RET
+
 PATCHES = [
     # Layer 1: Keychain cache bypass
     (0x3bc718, b'\x73\x2a\x01\xb4', "cbz x19  → nop  [無預存key檢查]"),
@@ -91,10 +127,10 @@ PATCHES = [
 ]
 
 # Special patches: non-NOP replacements
-OVERLAY_PATCH      = (0x3a20ac, b'\xff\x43\x05\xd1', b'\xc0\x03\x5f\xd6')  # show overlay fn → RET
+OVERLAY_PATCH      = (0x3a20ac, b'\xff\x43\x05\xd1', _bl(0x3a20ac, PROBE_C_ADDR))  # show overlay fn → probe C
 LAYER3_PATCH       = (0x392d54, b'\x68\x51\x02\x37', b'\x8b\x12\x00\x14')   # tbnz → b valid path
 INGAME_VALID_PATCH = (0x1c2b48, b'\xa0\x01\x00\x36', b'\x0d\x00\x00\x14')   # tbz → b 0x1c2b7c (always good path)
-SHOW_OVERLAY2_PATCH = (0x1b2960, b'\xf4\x4f\xbe\xa9', b'\xc0\x03\x5f\xd6') # fn@0x1b2960 (fail-path show overlay) → RET
+SHOW_OVERLAY2_PATCH = (0x1b2960, b'\xf4\x4f\xbe\xa9', _bl(0x1b2960, PROBE_D_ADDR)) # fn@0x1b2960 → probe D
 # Layer 6: startup overlay bypass — force fn@0x38e274 to always jump to key-processing code,
 # skipping the "no cached key" path (0x38eb98) that shows the overlay at startup
 LAYER6_PATCH       = (0x38e2f0, b'\xe0\x51\x02\x54', b'\x8f\x12\x00\x14')  # b.eq → b (always → 0x392d2c, bypasses startup overlay)
@@ -108,7 +144,7 @@ CBZ_OVERLAY_PATCH  = (0x397868, b'\x73\xe7\x02\xb4', b'\x3b\x17\x00\x14')  # CBZ
 FN_33B3A4_MOV0_PATCH = (0x33b3a4, b'\xff\x43\x02\xd1', b'\xe0\x03\x1f\xaa')  # SUB SP → MOV x0,#0
 FN_33B3A4_RET_PATCH  = (0x33b3a8, b'\xf4\x4f\x07\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
 # Layer 10: overlay update function bypass (called from startup 0x2d07dc; safety guard)
-SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x3a4ed4 → RET (overlay update)
+SHOW_OVERLAY4_PATCH = (0x3a4ed4, b'\xff\x83\x02\xd1', _bl(0x3a4ed4, PROBE_E_ADDR))  # fn@0x3a4ed4 → probe E
 # Layer 15: NOP the 3 BL _objc_msgSend calls inside fn@0x3bc648 that present overlay UI.
 # Killing fn@0x3bc648 entirely causes crash (function also does init work).
 # These 3 calls are the only UI-display side effects; NOP-ing them suppresses the overlay
@@ -137,13 +173,13 @@ LAYER11_PATCHES = [
 # And fn@0x2d0770 → RET to kill the entire startup overlay init chain at its root.
 REGISTER_CLASS_NOP_PATCH = (0x2eb078, b'\x87\x2a\x26\x94', b'\x1f\x20\x03\xd5')  # BL _objc_registerClassPair → NOP
 FN_33EA4C_RET_PATCH      = (0x33ea4c, b'\xff\x43\x03\xd1', b'\xc0\x03\x5f\xd6')  # fn@0x33ea4c (class factory) → RET
-FN_2D0770_RET_PATCH      = (0x2d0770, b'\xe9\x23\xb9\x6d', b'\xc0\x03\x5f\xd6')  # fn@0x2d0770 (startup chain) → RET
+FN_2D0770_RET_PATCH      = (0x2d0770, b'\xe9\x23\xb9\x6d', _bl(0x2d0770, PROBE_F_ADDR))  # fn@0x2d0770 → probe F
 
 # Layer 14: Kill fn@0x38e274 (key_val_show) entirely — both callers ignore return value.
 # Also kill 4th dispatch_after (HTTP callback tail-call) + both dispatch_async block submitters.
 # fn@0x38e274 is a monster function; making it RET immediately is cleaner than patching internals.
 LAYER14_PATCHES = [
-    (0x38e274, b'\xfc\x6f\xba\xa9', b'\xc0\x03\x5f\xd6'),  # fn@0x38e274 (key_val_show) → RET
+    (0x38e274, b'\xfc\x6f\xba\xa9', _bl(0x38e274, PROBE_A_ADDR)),  # fn@0x38e274 → probe A
     (0x362dfc, b'\x39\x4a\x24\x14', b'\x1f\x20\x03\xd5'),  # B→dispatch_after in HTTP callback (4th)
     (0x3afdd0, b'\x47\x16\x23\x94', b'\x1f\x20\x03\xd5'),  # BL dispatch_async block #1
     (0x3bc5c4, b'\x4a\xe4\x22\x94', b'\x1f\x20\x03\xd5'),  # BL dispatch_async block #2
@@ -187,8 +223,8 @@ FORCE_DELTA_PATH_PATCH = (0x3afe14, b'\x80\x00\x00\xb4', b'\x04\x00\x00\x14')  #
 # Fix: replace its first two instructions with MOV x0,xzr + RET so it returns nil immediately
 # without executing any overlay display logic.
 # With x0=nil, fn@0x3afe10's cbz x0 branches to 0x3afe24 (Delta execution path, key-valid path).
-FN_3BC648_MOV0_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', b'\xe0\x03\x1f\xaa')  # SUB SP → MOV x0,xzr
-FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET
+FN_3BC648_MOV0_PATCH = (0x3bc648, b'\xff\x43\x05\xd1', _bl(0x3bc648, PROBE_B_ADDR))  # SUB SP → BL probe B
+FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # STP → RET (after probe returns)
 
 # Layer 20 + 21: stderr log + Documents file log
 # Cave at 0xe555e8 (96 bytes):
@@ -202,17 +238,6 @@ LOG21_SUBROUTINE_ADDR = 0xe55648   # cave_base + 0x60 (96 bytes into cave)
 LOG20_HOOK_ADDR     = 0x3afe14
 LOG20_HOOK_EXPECTED = b'\x04\x00\x00\x14'   # B 0x3afe24 (Layer 18 result)
 LOG20_HOOK_PATCH    = b'\xf5\x95\x2a\x94'   # BL 0xe555e8
-
-# Layer 22: Kill _objc_msgSend PLT stub in libgloop.dylib.
-# The stub at 0xc75a88 is: ADRP x16; LDR x16,[x16,#N]; BR x16 (12 bytes).
-# Replacing with MOV x0,xzr; RET; NOP makes every msgSend call from libgloop return nil.
-# Roblox.app uses its own separate PLT stubs and is unaffected.
-# This eliminates all ObjC-based overlay creation regardless of which caller path is taken.
-MSGSEND_PLT_PATCH = [
-    (0xc75a88, b'\x30\x14\x00\xf0', b'\xe0\x03\x1f\xaa'),  # ADRP x16 → MOV x0,xzr
-    (0xc75a8c, b'\x10\xc6\x43\xf9', b'\xc0\x03\x5f\xd6'),  # LDR x16 → RET
-    (0xc75a90, b'\x00\x02\x1f\xd6', b'\x1f\x20\x03\xd5'),  # BR x16  → NOP
-]
 
 # PLT stubs in libgloop.dylib
 _PLT_WRITE    = 0xc75f2c
@@ -583,6 +608,28 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
     else:
         print(f"  [跳過] 0x{off20:x}: cave 不是零 — IPA 版本不符")
 
+    # Layer 22: Build and write 6 debug probe stubs (0xe556f4..0xe55860)
+    probes = [
+        (PROBE_A_ADDR, b'A38e274\n', False),
+        (PROBE_B_ADDR, b'B3bc648\n', True),
+        (PROBE_C_ADDR, b'C3a20ac\n', False),
+        (PROBE_D_ADDR, b'D1b2960\n', False),
+        (PROBE_E_ADDR, b'E3a4ed4\n', False),
+        (PROBE_F_ADDR, b'F2d0770\n', False),
+    ]
+    for addr, msg, ret_nil in probes:
+        stub = build_probe_stub(addr, LOG21_SUBROUTINE_ADDR, msg, ret_nil)
+        found = bytes(dylib_data[addr:addr+len(stub)])
+        if found == stub:
+            print(f"  [已patch] 0x{addr:x}: probe {msg[:1].decode()} stub")
+            patched += 1
+        elif all(b == 0 for b in found):
+            dylib_data[addr:addr+len(stub)] = stub
+            print(f"  [✓] 0x{addr:x}: probe {msg[:1].decode()} stub 寫入 ({len(stub)} bytes)")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{addr:x}: probe {msg[:1].decode()} cave 不是零")
+
     # Hook: replace B 0x3afe24 at 0x3afe14 with BL cave (共用)
     off, expected, replacement = LOG20_HOOK_ADDR, LOG20_HOOK_EXPECTED, LOG20_HOOK_PATCH
     found = bytes(dylib_data[off:off+4])
@@ -595,19 +642,6 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         patched += 1
     else:
         print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
-
-    # Layer 22: Kill _objc_msgSend PLT stub → every msgSend call from libgloop returns nil
-    for off, expected, replacement in MSGSEND_PLT_PATCH:
-        found = bytes(dylib_data[off:off+4])
-        if found == replacement:
-            print(f"  [已patch] 0x{off:x}: layer22 msgSend stub")
-            patched += 1
-        elif found == expected:
-            dylib_data[off:off+4] = replacement
-            print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [layer22 _objc_msgSend PLT → nil-ret]")
-            patched += 1
-        else:
-            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
     return dylib_data, patched
 
@@ -653,7 +687,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + len(MSGSEND_PLT_PATCH) + 20
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 26
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
