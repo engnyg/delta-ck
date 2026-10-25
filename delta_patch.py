@@ -69,6 +69,18 @@ def _ret():
 def _add_x0_sp_0():
     return struct.pack('<I', 0x910003E0)  # add x0,sp,#0
 
+def _blr(rn):
+    return struct.pack('<I', 0xD63F0000 | (rn << 5))
+
+def _movn(rd, imm16):
+    return struct.pack('<I', 0x92800000 | (imm16 << 5) | rd)
+
+def _add_reg_reg(rd, rn, rm):
+    return struct.pack('<I', 0x8B000000 | (rm << 16) | (rn << 5) | rd)
+
+def _strb_zero(xn):
+    return struct.pack('<I', 0x3900001F | (xn << 5))
+
 DYLIB_PATH = "Payload/Roblox.app/libgloop.dylib"
 
 def build_probe_stub(base, log21_addr, msg: bytes, ret_nil=False):
@@ -99,13 +111,14 @@ def build_probe_stub(base, log21_addr, msg: bytes, ret_nil=False):
     assert pc == msg_start
     return bytes(b''.join(i)) + msg_padded
 
-# Debug probe cave addresses (in zero-filled gap after log21 at 0xe556f4..0xe58000)
-PROBE_A_ADDR = 0xe55700   # fn@38e274 → log "A38e274\n" → RET
-PROBE_B_ADDR = 0xe5573c   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
-PROBE_C_ADDR = 0xe5577c   # fn@3a20ac → log "C3a20ac\n" → RET
-PROBE_D_ADDR = 0xe557b8   # fn@1b2960 → log "D1b2960\n" → RET
-PROBE_E_ADDR = 0xe557f4   # fn@3a4ed4 → log "E3a4ed4\n" → RET
-PROBE_F_ADDR = 0xe55830   # fn@2d0770 → log "F2d0770\n" → RET
+# Debug probe cave addresses (in zero-filled gap after log21 at 0xe55704..0xe58000)
+PROBE_A_ADDR = 0xe55704   # fn@38e274 → log "A38e274\n" → RET
+PROBE_B_ADDR = 0xe55740   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
+PROBE_C_ADDR = 0xe55780   # fn@3a20ac → log "C3a20ac\n" → RET
+PROBE_D_ADDR = 0xe557bc   # fn@1b2960 → log "D1b2960\n" → RET
+PROBE_E_ADDR = 0xe557f8   # fn@3a4ed4 → log "E3a4ed4\n" → RET
+PROBE_F_ADDR = 0xe55834   # fn@2d0770 → log "F2d0770\n" → RET
+SHARE_SHEET_ADDR = 0xe55870  # clipboard export subroutine
 
 PATCHES = [
     # Layer 1: Keychain cache bypass
@@ -234,7 +247,7 @@ FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # S
 #   getenv("HOME") → snprintf(path,128,"%s/Documents/Delta/delta_log.txt",home) → open/write/close
 #   Strings at sub+0x88: "HOME\0\0\0\0", "%s/Documents/delta_log.txt\0"
 LOG20_CAVE_ADDR     = 0xe555e8
-LOG21_SUBROUTINE_ADDR = 0xe55648   # cave_base + 0x60 (96 bytes into cave)
+LOG21_SUBROUTINE_ADDR = 0xe5564c   # cave_base + 0x64 (100 bytes into cave)
 LOG20_HOOK_ADDR     = 0x3afe14
 LOG20_HOOK_EXPECTED = b'\x04\x00\x00\x14'   # B 0x3afe24 (Layer 18 result)
 LOG20_HOOK_PATCH    = b'\xf5\x95\x2a\x94'   # BL 0xe555e8
@@ -245,39 +258,45 @@ _PLT_GETENV   = 0xc758c0
 _PLT_SNPRINTF = 0xc75d70
 _PLT_OPEN     = 0xc75aac
 _PLT_CLOSE    = 0xc75698
+_PLT_DLSYM      = 0xc75764
+_PLT_FOPEN      = 0xc757e8
+_PLT_FREAD      = 0xc75818
+_PLT_FCLOSE     = 0xc75788
+_PLT_OBJMSGSEND = 0xc75a88
 
 MSG21 = b'[delta] bypass OK\n'   # 18 bytes
 
-def build_log20_cave(cave_base, log21_addr):
-    """Cave at cave_base: write(2,msg,18), call log_to_docs(x1=msg,x2=18), restore, b 0x3afe24.
-    Total: 18 instructions (0x48 bytes) + 18-byte msg + 6-byte pad = 96 bytes."""
-    msg_addr = cave_base + 0x48
+def build_log20_cave(cave_base, log21_addr, share_sheet_addr):
+    """Cave at cave_base: write(2,msg,18), call log_to_docs, call clipboard, restore, b 0x3afe24.
+    Total: 19 instructions (0x4C bytes) + 18-byte msg + 6-byte pad = 100 bytes."""
+    msg_addr = cave_base + 0x4C
     i = []
     pc = cave_base
     def emit(b): nonlocal pc; i.append(b); pc += 4
 
-    emit(_stp_pre(29, 30, 31, -0x60))            # stp x29,x30,[sp,#-0x60]!
-    emit(_stp_off(0, 1, 31, 0x10))               # stp x0,x1,[sp,#0x10]
-    emit(_stp_off(2, 3, 31, 0x20))               # stp x2,x3,[sp,#0x20]
-    emit(_stp_off(4, 5, 31, 0x30))               # stp x4,x5,[sp,#0x30]
-    emit(_movz(0, 2))                             # mov x0,#2 (stderr)
-    emit(_adrp(pc, msg_addr, 1))                  # adrp x1, msg_page
-    emit(_add_imm(1, 1, msg_addr & 0xFFF))        # add x1,x1,#msg_off
-    emit(_movz(2, len(MSG21)))                    # mov x2,#18
-    emit(_bl(pc, _PLT_WRITE))                     # bl _write
-    emit(_adrp(pc, msg_addr, 1))                  # adrp x1, msg_page  (reload)
-    emit(_add_imm(1, 1, msg_addr & 0xFFF))        # add x1,x1,#msg_off
-    emit(_movz(2, len(MSG21)))                    # mov x2,#18
-    emit(_bl(pc, log21_addr))                     # bl log_to_docs
-    emit(_ldp_off(0, 1, 31, 0x10))               # ldp x0,x1,[sp,#0x10]
-    emit(_ldp_off(2, 3, 31, 0x20))               # ldp x2,x3,[sp,#0x20]
-    emit(_ldp_off(4, 5, 31, 0x30))               # ldp x4,x5,[sp,#0x30]
-    emit(_ldp_post(29, 30, 31, 0x60))            # ldp x29,x30,[sp],#0x60
-    emit(_b(pc, 0x3afe24))                        # b 0x3afe24
+    emit(_stp_pre(29, 30, 31, -0x60))
+    emit(_stp_off(0, 1, 31, 0x10))
+    emit(_stp_off(2, 3, 31, 0x20))
+    emit(_stp_off(4, 5, 31, 0x30))
+    emit(_movz(0, 2))
+    emit(_adrp(pc, msg_addr, 1))
+    emit(_add_imm(1, 1, msg_addr & 0xFFF))
+    emit(_movz(2, len(MSG21)))
+    emit(_bl(pc, _PLT_WRITE))
+    emit(_adrp(pc, msg_addr, 1))
+    emit(_add_imm(1, 1, msg_addr & 0xFFF))
+    emit(_movz(2, len(MSG21)))
+    emit(_bl(pc, log21_addr))
+    emit(_bl(pc, share_sheet_addr))
+    emit(_ldp_off(0, 1, 31, 0x10))
+    emit(_ldp_off(2, 3, 31, 0x20))
+    emit(_ldp_off(4, 5, 31, 0x30))
+    emit(_ldp_post(29, 30, 31, 0x60))
+    emit(_b(pc, 0x3afe24))
 
-    assert pc == cave_base + 0x48, f"cave instr end at {pc:#x} expected {cave_base+0x48:#x}"
-    code = b''.join(i) + MSG21 + b'\x00' * 6     # 72+18+6 = 96 bytes = 0x60
-    assert len(code) == 0x60
+    assert pc == cave_base + 0x4C, f"cave instr end at {pc:#x} expected {cave_base+0x4C:#x}"
+    code = b''.join(i) + MSG21 + b'\x00' * 6     # 76+18+6 = 100 bytes = 0x64
+    assert len(code) == 0x64
     return code
 
 def build_log21_subroutine(base):
@@ -341,6 +360,156 @@ def build_log21_subroutine(base):
     fmt_bytes  = b'%s/../Documents/delta_log.txt\x00\x00\x00\x00\x00\x00\x00'  # 29+1+6 = 36 bytes
     code = bytes(b''.join(i)) + home_bytes + fmt_bytes + b'\x00' * 4  # 136+8+36+4=184 bytes
     assert len(code) == 184
+    return code
+
+def build_share_sheet_sub(base):
+    """Read Documents/delta_log.txt via TMPDIR, copy to UIPasteboard via ObjC runtime.
+    82 instructions (328 bytes) + 180 bytes data = 508 bytes total."""
+    data_base = base + 82 * 4  # = base + 0x148
+
+    # Offsets within data section
+    off_objc_getClass         = 0    # "objc_getClass\0\0\0"           16B
+    off_sel_registerName      = 16   # "sel_registerName\0\0\0\0"      20B
+    off_TMPDIR                = 36   # "TMPDIR\0\0"                      8B
+    off_fmt                   = 44   # "%s/../Documents/delta_log.txt\0\0" 32B
+    off_r                     = 76   # "r\0\0\0\0\0\0\0"                8B
+    off_NSString              = 84   # "NSString\0\0\0\0\0\0\0\0"      16B
+    off_stringWithUTF8String_ = 100  # "stringWithUTF8String:\0\0\0"   24B
+    off_UIPasteboard          = 124  # "UIPasteboard\0\0\0\0"          16B
+    off_generalPasteboard     = 140  # "generalPasteboard\0\0\0\0\0\0\0" 24B
+    off_setString_            = 164  # "setString:\0\0\0\0\0\0"        16B
+
+    done_addr = base + 76 * 4  # epilogue label (after 76 body instructions)
+
+    i = []; pc = base
+    def emit(b): nonlocal pc; i.append(b); pc += 4
+
+    # Prologue: 448-byte frame (sp+0=path_buf 128B, sp+0x80=log_buf 256B, sp+0x180=saved regs)
+    emit(_sub_sp(0x1C0))                                                    # 1
+    emit(_stp_off(19, 20, 31, 0x180))                                       # 2
+    emit(_stp_off(21, 22, 31, 0x190))                                       # 3
+    emit(_stp_off(23, 24, 31, 0x1A0))                                       # 4
+    emit(_stp_off(29, 30, 31, 0x1B0))                                       # 5
+
+    # dlsym(RTLD_DEFAULT, "objc_getClass") → x19
+    emit(_movn(0, 1))                                                       # 6  x0=-2 (RTLD_DEFAULT)
+    emit(_adrp(pc, data_base + off_objc_getClass, 1))                       # 7
+    emit(_add_imm(1, 1, (data_base + off_objc_getClass) & 0xFFF))           # 8
+    emit(_bl(pc, _PLT_DLSYM))                                               # 9
+    emit(_mov_reg(19, 0))                                                   # 10 x19=objc_getClass
+
+    # dlsym(RTLD_DEFAULT, "sel_registerName") → x20
+    emit(_movn(0, 1))                                                       # 11
+    emit(_adrp(pc, data_base + off_sel_registerName, 1))                    # 12
+    emit(_add_imm(1, 1, (data_base + off_sel_registerName) & 0xFFF))        # 13
+    emit(_bl(pc, _PLT_DLSYM))                                               # 14
+    emit(_mov_reg(20, 0))                                                   # 15 x20=sel_registerName
+
+    # getenv("TMPDIR") → skip if null
+    emit(_adrp(pc, data_base + off_TMPDIR, 0))                              # 16
+    emit(_add_imm(0, 0, (data_base + off_TMPDIR) & 0xFFF))                  # 17
+    emit(_bl(pc, _PLT_GETENV))                                              # 18
+    emit(_cbz(pc, done_addr, 0))                                            # 19
+
+    # snprintf(path_buf, 128, fmt, tmpdir)
+    emit(_mov_reg(21, 0))                                                   # 20 x21=tmpdir
+    emit(_add_x0_sp_0())                                                    # 21 x0=path_buf
+    emit(_movz(1, 128))                                                     # 22
+    emit(_adrp(pc, data_base + off_fmt, 2))                                 # 23
+    emit(_add_imm(2, 2, (data_base + off_fmt) & 0xFFF))                     # 24
+    emit(_mov_reg(3, 21))                                                   # 25
+    emit(_bl(pc, _PLT_SNPRINTF))                                            # 26
+
+    # fopen(path_buf, "r") → skip if null
+    emit(_add_x0_sp_0())                                                    # 27
+    emit(_adrp(pc, data_base + off_r, 1))                                   # 28
+    emit(_add_imm(1, 1, (data_base + off_r) & 0xFFF))                       # 29
+    emit(_bl(pc, _PLT_FOPEN))                                               # 30
+    emit(_cbz(pc, done_addr, 0))                                            # 31
+
+    # fread(log_buf, 1, 255, FILE*)
+    emit(_mov_reg(23, 0))                                                   # 32 x23=FILE*
+    emit(_add_imm(0, 31, 0x80))                                             # 33 x0=sp+0x80 (log_buf)
+    emit(_movz(1, 1))                                                       # 34
+    emit(_movz(2, 255))                                                     # 35
+    emit(_mov_reg(3, 23))                                                   # 36
+    emit(_bl(pc, _PLT_FREAD))                                               # 37
+    emit(_mov_reg(24, 0))                                                   # 38 x24=bytes_read
+
+    # null-terminate log_buf[bytes_read]
+    emit(_add_imm(0, 31, 0x80))                                             # 39 x0=log_buf base
+    emit(_add_reg_reg(0, 0, 24))                                            # 40 x0+=bytes_read
+    emit(_strb_zero(0))                                                     # 41 strb wzr,[x0]
+
+    # fclose(FILE*)
+    emit(_mov_reg(0, 23))                                                   # 42
+    emit(_bl(pc, _PLT_FCLOSE))                                              # 43
+
+    # [NSString stringWithUTF8String:log_buf] → x22
+    emit(_adrp(pc, data_base + off_NSString, 0))                            # 44
+    emit(_add_imm(0, 0, (data_base + off_NSString) & 0xFFF))                # 45
+    emit(_blr(19))                                                          # 46 objc_getClass
+    emit(_mov_reg(21, 0))                                                   # 47 x21=NSString class
+    emit(_adrp(pc, data_base + off_stringWithUTF8String_, 0))               # 48
+    emit(_add_imm(0, 0, (data_base + off_stringWithUTF8String_) & 0xFFF))   # 49
+    emit(_blr(20))                                                          # 50 sel_registerName
+    emit(_mov_reg(24, 0))                                                   # 51 x24=SEL
+    emit(_mov_reg(0, 21))                                                   # 52 x0=class
+    emit(_mov_reg(1, 24))                                                   # 53 x1=SEL
+    emit(_add_imm(2, 31, 0x80))                                             # 54 x2=log_buf
+    emit(_bl(pc, _PLT_OBJMSGSEND))                                          # 55
+    emit(_mov_reg(22, 0))                                                   # 56 x22=logStr
+
+    # [UIPasteboard generalPasteboard] → x23
+    emit(_adrp(pc, data_base + off_UIPasteboard, 0))                        # 57
+    emit(_add_imm(0, 0, (data_base + off_UIPasteboard) & 0xFFF))            # 58
+    emit(_blr(19))                                                          # 59 objc_getClass
+    emit(_mov_reg(21, 0))                                                   # 60 x21=class
+    emit(_adrp(pc, data_base + off_generalPasteboard, 0))                   # 61
+    emit(_add_imm(0, 0, (data_base + off_generalPasteboard) & 0xFFF))       # 62
+    emit(_blr(20))                                                          # 63 sel_registerName
+    emit(_mov_reg(24, 0))                                                   # 64 x24=SEL
+    emit(_mov_reg(0, 21))                                                   # 65 x0=class
+    emit(_mov_reg(1, 24))                                                   # 66 x1=SEL
+    emit(_bl(pc, _PLT_OBJMSGSEND))                                          # 67
+    emit(_mov_reg(23, 0))                                                   # 68 x23=pasteboard
+
+    # [pasteboard setString:logStr]
+    emit(_adrp(pc, data_base + off_setString_, 0))                          # 69
+    emit(_add_imm(0, 0, (data_base + off_setString_) & 0xFFF))              # 70
+    emit(_blr(20))                                                          # 71 sel_registerName
+    emit(_mov_reg(24, 0))                                                   # 72 x24=SEL
+    emit(_mov_reg(0, 23))                                                   # 73 x0=pasteboard
+    emit(_mov_reg(1, 24))                                                   # 74 x1=SEL
+    emit(_mov_reg(2, 22))                                                   # 75 x2=logStr
+    emit(_bl(pc, _PLT_OBJMSGSEND))                                          # 76
+
+    assert pc == done_addr, f"done_addr mismatch: {pc:#x} != {done_addr:#x}"
+
+    # Epilogue
+    emit(_ldp_off(29, 30, 31, 0x1B0))                                       # 77
+    emit(_ldp_off(23, 24, 31, 0x1A0))                                       # 78
+    emit(_ldp_off(21, 22, 31, 0x190))                                       # 79
+    emit(_ldp_off(19, 20, 31, 0x180))                                       # 80
+    emit(_add_sp(0x1C0))                                                    # 81
+    emit(_ret())                                                             # 82
+
+    assert pc == data_base, f"data_base mismatch: {pc:#x} != {data_base:#x}"
+
+    data  = b'objc_getClass\x00\x00\x00'                   # 16B (off=0)
+    data += b'sel_registerName\x00\x00\x00\x00'            # 20B (off=16)
+    data += b'TMPDIR\x00\x00'                               # 8B  (off=36)
+    data += b'%s/../Documents/delta_log.txt\x00\x00\x00'     # 32B (off=44)
+    data += b'r\x00\x00\x00\x00\x00\x00\x00'               # 8B  (off=76)
+    data += b'NSString\x00\x00\x00\x00\x00\x00\x00\x00'    # 16B (off=84)
+    data += b'stringWithUTF8String:\x00\x00\x00'            # 24B (off=100)
+    data += b'UIPasteboard\x00\x00\x00\x00'                 # 16B (off=124)
+    data += b'generalPasteboard\x00\x00\x00\x00\x00\x00\x00' # 24B (off=140)
+    data += b'setString:\x00\x00\x00\x00\x00\x00'           # 16B (off=164)
+    assert len(data) == 180
+
+    code = bytes(b''.join(i)) + data
+    assert len(code) == 508
     return code
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
@@ -583,10 +752,11 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
         else:
             print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
-    # Layer 20+21: stderr + Documents file logger
-    # Build cave and subroutine bytes now (PC-relative encodings depend on base addresses)
-    cave_bytes = build_log20_cave(LOG20_CAVE_ADDR, LOG21_SUBROUTINE_ADDR)
-    sub_bytes  = build_log21_subroutine(LOG21_SUBROUTINE_ADDR)
+    # Layer 20+21+22c: stderr + Documents file logger + clipboard export
+    # Build all cave bytes now (PC-relative encodings depend on base addresses)
+    cave_bytes  = build_log20_cave(LOG20_CAVE_ADDR, LOG21_SUBROUTINE_ADDR, SHARE_SHEET_ADDR)
+    sub_bytes   = build_log21_subroutine(LOG21_SUBROUTINE_ADDR)
+    share_bytes = build_share_sheet_sub(SHARE_SHEET_ADDR)
 
     # Layer 21: write log_to_docs subroutine at 0xe55648
     off21 = LOG21_SUBROUTINE_ADDR
@@ -635,6 +805,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
             patched += 1
         else:
             print(f"  [跳過] 0x{addr:x}: probe {msg[:1].decode()} cave 不是零")
+
+    # Layer 22c: write clipboard export subroutine at SHARE_SHEET_ADDR
+    off_ss = SHARE_SHEET_ADDR
+    ss_found = bytes(dylib_data[off_ss:off_ss+len(share_bytes)])
+    if ss_found == share_bytes:
+        print(f"  [已patch] 0x{off_ss:x}: share_sheet subroutine")
+        patched += 1
+    elif all(b == 0 for b in ss_found):
+        dylib_data[off_ss:off_ss+len(share_bytes)] = share_bytes
+        print(f"  [✓] 0x{off_ss:x}: share_sheet subroutine 寫入 ({len(share_bytes)} bytes)")
+        patched += 1
+    else:
+        print(f"  [跳過] 0x{off_ss:x}: share_sheet cave 不是零 — IPA 版本不符")
 
     # Hook: replace B 0x3afe24 at 0x3afe14 with BL cave (共用)
     off, expected, replacement = LOG20_HOOK_ADDR, LOG20_HOOK_EXPECTED, LOG20_HOOK_PATCH
@@ -693,7 +876,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 26
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 27
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
