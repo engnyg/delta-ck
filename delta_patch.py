@@ -281,9 +281,9 @@ def build_log20_cave(cave_base, log21_addr):
     return code
 
 def build_log21_subroutine(base):
-    """log_to_file(x1=msg_ptr, x2=msg_len): appends to /var/mobile/delta_log.txt.
-    Saves/restores x19-x22, x29, x30. Total: 24 instructions (96 bytes) + 28-byte path = 124 bytes."""
-    path_str = b'/var/mobile/delta_log.txt\x00\x00\x00'  # 28 bytes (4-aligned)
+    """log_to_file(x1=msg_ptr, x2=msg_len): appends to /var/mobile/delta/delta/workspace/delta_log.txt.
+    Saves/restores x19-x22, x29, x30. Total: 24 instructions (96 bytes) + 48-byte path = 144 bytes."""
+    path_str = b'/var/mobile/delta/delta/workspace/delta_log.txt\x00'  # 48 bytes (4-aligned)
     log_ret  = base + 19 * 4   # epilogue after 19 body instructions
 
     i = []
@@ -322,7 +322,7 @@ def build_log21_subroutine(base):
     emit(_ret())
     assert pc == base + 24 * 4, f"path at {pc:#x} expected {base+24*4:#x}"
 
-    return bytes(b''.join(i)) + path_str          # 96 + 28 = 124 bytes
+    return bytes(b''.join(i)) + path_str          # 96 + 48 = 144 bytes
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
 # Hooks fn@0x3afe10 entry (original: BL 0x3bc648) to call our stub first.
