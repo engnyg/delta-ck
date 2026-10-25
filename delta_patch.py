@@ -203,6 +203,17 @@ LOG20_HOOK_ADDR     = 0x3afe14
 LOG20_HOOK_EXPECTED = b'\x04\x00\x00\x14'   # B 0x3afe24 (Layer 18 result)
 LOG20_HOOK_PATCH    = b'\xf5\x95\x2a\x94'   # BL 0xe555e8
 
+# Layer 22: Kill _objc_msgSend PLT stub in libgloop.dylib.
+# The stub at 0xc75a88 is: ADRP x16; LDR x16,[x16,#N]; BR x16 (12 bytes).
+# Replacing with MOV x0,xzr; RET; NOP makes every msgSend call from libgloop return nil.
+# Roblox.app uses its own separate PLT stubs and is unaffected.
+# This eliminates all ObjC-based overlay creation regardless of which caller path is taken.
+MSGSEND_PLT_PATCH = [
+    (0xc75a88, b'\x30\x14\x00\xf0', b'\xe0\x03\x1f\xaa'),  # ADRP x16 → MOV x0,xzr
+    (0xc75a8c, b'\x10\xc6\x43\xf9', b'\xc0\x03\x5f\xd6'),  # LDR x16 → RET
+    (0xc75a90, b'\x00\x02\x1f\xd6', b'\x1f\x20\x03\xd5'),  # BR x16  → NOP
+]
+
 # PLT stubs in libgloop.dylib
 _PLT_WRITE    = 0xc75f2c
 _PLT_GETENV   = 0xc758c0
@@ -585,6 +596,19 @@ def patch_dylib(dylib_data: bytearray) -> bytearray:
     else:
         print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
 
+    # Layer 22: Kill _objc_msgSend PLT stub → every msgSend call from libgloop returns nil
+    for off, expected, replacement in MSGSEND_PLT_PATCH:
+        found = bytes(dylib_data[off:off+4])
+        if found == replacement:
+            print(f"  [已patch] 0x{off:x}: layer22 msgSend stub")
+            patched += 1
+        elif found == expected:
+            dylib_data[off:off+4] = replacement
+            print(f"  [✓] 0x{off:x}: {expected.hex()} → {replacement.hex()}  [layer22 _objc_msgSend PLT → nil-ret]")
+            patched += 1
+        else:
+            print(f"  [跳過] 0x{off:x}: 預期 {expected.hex()} 但找到 {found.hex()} — IPA 版本不符")
+
     return dylib_data, patched
 
 def process_ipa(input_path: str, output_path: str):
@@ -629,7 +653,7 @@ def process_ipa(input_path: str, output_path: str):
                 f.write(new_plist)
             print(f"  [顯眼] CFBundleDisplayName ← '{DISPLAY_NAME}'")
 
-        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + 20
+        total = len(PATCHES) + len(LAYER11_PATCHES) + len(LAYER13_PATCHES) + len(LAYER14_PATCHES) + len(LAYER15_PATCHES) + len(LAYER16_PATCHES) + len(MSGSEND_PLT_PATCH) + 20
         print(f"\n重新打包 IPA ({count}/{total} patch 套用)...")
         payload_dir = os.path.join(tmpdir, "Payload")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
