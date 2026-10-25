@@ -100,12 +100,12 @@ def build_probe_stub(base, log21_addr, msg: bytes, ret_nil=False):
     return bytes(b''.join(i)) + msg_padded
 
 # Debug probe cave addresses (in zero-filled gap after log21 at 0xe556f4..0xe58000)
-PROBE_A_ADDR = 0xe556f4   # fn@38e274 → log "A38e274\n" → RET
-PROBE_B_ADDR = 0xe55730   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
-PROBE_C_ADDR = 0xe55770   # fn@3a20ac → log "C3a20ac\n" → RET
-PROBE_D_ADDR = 0xe557ac   # fn@1b2960 → log "D1b2960\n" → RET
-PROBE_E_ADDR = 0xe557e8   # fn@3a4ed4 → log "E3a4ed4\n" → RET
-PROBE_F_ADDR = 0xe55824   # fn@2d0770 → log "F2d0770\n" → RET
+PROBE_A_ADDR = 0xe55700   # fn@38e274 → log "A38e274\n" → RET
+PROBE_B_ADDR = 0xe5573c   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
+PROBE_C_ADDR = 0xe5577c   # fn@3a20ac → log "C3a20ac\n" → RET
+PROBE_D_ADDR = 0xe557b8   # fn@1b2960 → log "D1b2960\n" → RET
+PROBE_E_ADDR = 0xe557f4   # fn@3a4ed4 → log "E3a4ed4\n" → RET
+PROBE_F_ADDR = 0xe55830   # fn@2d0770 → log "F2d0770\n" → RET
 
 PATCHES = [
     # Layer 1: Keychain cache bypass
@@ -231,7 +231,7 @@ FN_3BC648_RET_PATCH  = (0x3bc64c, b'\xf8\x5f\x11\xa9', b'\xc0\x03\x5f\xd6')  # S
 #   stp/stp/stp/stp registers, write(2,msg,18), reload msg, bl log_to_docs, ldp/ldp/ldp/ldp, b 0x3afe24
 #   msg "[delta] bypass OK\n" at cave+0x48, zeros to cave+0x60
 # Layer 21: log_to_docs subroutine at 0xe55648 (172 bytes):
-#   getenv("HOME") → snprintf(path,128,"%s/Documents/delta_log.txt",home) → open/write/close
+#   getenv("HOME") → snprintf(path,128,"%s/Documents/Delta/delta_log.txt",home) → open/write/close
 #   Strings at sub+0x88: "HOME\0\0\0\0", "%s/Documents/delta_log.txt\0"
 LOG20_CAVE_ADDR     = 0xe555e8
 LOG21_SUBROUTINE_ADDR = 0xe55648   # cave_base + 0x60 (96 bytes into cave)
@@ -281,48 +281,67 @@ def build_log20_cave(cave_base, log21_addr):
     return code
 
 def build_log21_subroutine(base):
-    """log_to_file(x1=msg_ptr, x2=msg_len): appends to /var/mobile/delta/delta/workspace/delta_log.txt.
-    Saves/restores x19-x22, x29, x30. Total: 24 instructions (96 bytes) + 48-byte path = 144 bytes."""
-    path_str = b'/var/mobile/delta/delta/workspace/delta_log.txt\x00'  # 48 bytes (4-aligned)
-    log_ret  = base + 19 * 4   # epilogue after 19 body instructions
+    """log_to_file(x1=msg_ptr, x2=msg_len): appends to $HOME/Documents/Delta/delta_log.txt.
+    Uses getenv("HOME")+snprintf. 34 instructions (136 bytes) + 44 bytes data + 4 pad = 184 bytes."""
+    data_base = base + 34 * 4                     # strings start 0x88 bytes from base
+    home_str  = data_base                         # "HOME\0" + 3 pad = 8 bytes
+    fmt_str   = data_base + 8                     # "%s/Documents/Delta/delta_log.txt\0" + 3 pad = 36 bytes
+    log_ret   = base + 29 * 4                     # epilogue (after 29 body instructions)
 
-    i = []
-    pc = base
+    i = []; pc = base
     def emit(b): nonlocal pc; i.append(b); pc += 4
 
-    # Prologue
-    emit(_sub_sp(0x60))
-    emit(_stp_off(19, 20, 31, 0x50))
-    emit(_stp_off(21, 22, 31, 0x40))
-    emit(_stp_off(29, 30, 31, 0x30))
-    emit(_mov_reg(19, 1))                         # x19 = msg_ptr
-    emit(_mov_reg(20, 2))                         # x20 = msg_len
-    # open hardcoded path
-    path_start = base + 24 * 4
-    emit(_adrp(pc, path_start, 0))                # adrp x0, path_page
-    emit(_add_imm(0, 0, path_start & 0xFFF))      # add x0, x0, #path_off
-    emit(_movz(1, 0x209))                         # O_WRONLY|O_CREAT|O_APPEND
-    emit(_movz(2, 0x1a4))                         # 0644
-    emit(_bl(pc, _PLT_OPEN))
-    emit(_cmn_w0_1())
-    emit(_beq(pc, log_ret))                       # fd==-1 → skip
-    # write
-    emit(_mov_reg(21, 0))                         # x21 = fd  (x0 still = fd)
-    emit(_mov_reg(1, 19))                         # x1 = msg_ptr
-    emit(_mov_reg(2, 20))                         # x2 = msg_len
-    emit(_bl(pc, _PLT_WRITE))                     # _write(x0=fd, x1=msg, x2=len)
-    emit(_mov_reg(0, 21))                         # x0 = fd
-    emit(_bl(pc, _PLT_CLOSE))
-    # log_ret:
-    assert pc == log_ret, f"log_ret at {pc:#x} expected {log_ret:#x}"
-    emit(_ldp_off(29, 30, 31, 0x30))
-    emit(_ldp_off(21, 22, 31, 0x40))
-    emit(_ldp_off(19, 20, 31, 0x50))
-    emit(_add_sp(0x60))
-    emit(_ret())
-    assert pc == base + 24 * 4, f"path at {pc:#x} expected {base+24*4:#x}"
+    # Prologue: 0xB0 stack (128-byte path buf at sp+0x00, x19-x22 at +0x80/+0x90, fp-lr at +0xA0)
+    emit(_sub_sp(0xB0))                           # 1
+    emit(_stp_off(19, 20, 31, 0x80))              # 2
+    emit(_stp_off(21, 22, 31, 0x90))              # 3
+    emit(_stp_off(29, 30, 31, 0xA0))              # 4
+    emit(_mov_reg(19, 1))                         # 5  x19=msg_ptr
+    emit(_mov_reg(20, 2))                         # 6  x20=msg_len
+    # getenv("HOME")
+    emit(_adrp(pc, home_str, 0))                  # 7
+    emit(_add_imm(0, 0, home_str & 0xFFF))        # 8
+    emit(_bl(pc, _PLT_GETENV))                    # 9
+    emit(_cbz(pc, log_ret, 0))                    # 10 cbz x0, log_ret
+    # snprintf(buf, 128, "%s/Documents/Delta/delta_log.txt", home)
+    emit(_mov_reg(22, 0))                         # 11  x22=home_ptr
+    emit(_add_x0_sp_0())                          # 12  x0=buf (sp+0)
+    emit(_movz(1, 0x80))                          # 13  x1=128
+    emit(_adrp(pc, fmt_str, 2))                   # 14
+    emit(_add_imm(2, 2, fmt_str & 0xFFF))         # 15
+    emit(_mov_reg(3, 22))                         # 16  x3=home_ptr
+    emit(_bl(pc, _PLT_SNPRINTF))                  # 17
+    # open(path, O_WRONLY|O_CREAT|O_APPEND, 0644)
+    emit(_add_x0_sp_0())                          # 18  x0=path (sp+0)
+    emit(_movz(1, 0x209))                         # 19
+    emit(_movz(2, 0x1a4))                         # 20
+    emit(_bl(pc, _PLT_OPEN))                      # 21
+    emit(_cmn_w0_1())                             # 22
+    emit(_beq(pc, log_ret))                       # 23  fd==-1 → skip
+    # write + close
+    emit(_mov_reg(21, 0))                         # 24  x21=fd
+    emit(_mov_reg(1, 19))                         # 25
+    emit(_mov_reg(2, 20))                         # 26
+    emit(_bl(pc, _PLT_WRITE))                     # 27
+    emit(_mov_reg(0, 21))                         # 28
+    emit(_bl(pc, _PLT_CLOSE))                     # 29
 
-    return bytes(b''.join(i)) + path_str          # 96 + 48 = 144 bytes
+    assert pc == log_ret, f"log_ret mismatch: {pc:#x} != {log_ret:#x}"
+
+    # Epilogue
+    emit(_ldp_off(29, 30, 31, 0xA0))             # 30
+    emit(_ldp_off(21, 22, 31, 0x90))             # 31
+    emit(_ldp_off(19, 20, 31, 0x80))             # 32
+    emit(_add_sp(0xB0))                           # 33
+    emit(_ret())                                  # 34
+
+    assert pc == data_base, f"data_base mismatch: {pc:#x} != {data_base:#x}"
+
+    home_bytes = b'HOME\x00\x00\x00\x00'          # 8 bytes
+    fmt_bytes  = b'%s/Documents/Delta/delta_log.txt\x00\x00\x00\x00'  # 32+4null = 36 bytes
+    code = bytes(b''.join(i)) + home_bytes + fmt_bytes + b'\x00' * 4  # 136+44+4=184 bytes
+    assert len(code) == 184
+    return code
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
 # Hooks fn@0x3afe10 entry (original: BL 0x3bc648) to call our stub first.
