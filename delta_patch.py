@@ -100,12 +100,12 @@ def build_probe_stub(base, log21_addr, msg: bytes, ret_nil=False):
     return bytes(b''.join(i)) + msg_padded
 
 # Debug probe cave addresses (in zero-filled gap after log21 at 0xe556f4..0xe58000)
-PROBE_A_ADDR = 0xe55710   # fn@38e274 → log "A38e274\n" → RET
-PROBE_B_ADDR = 0xe5574c   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
-PROBE_C_ADDR = 0xe5578c   # fn@3a20ac → log "C3a20ac\n" → RET
-PROBE_D_ADDR = 0xe557c8   # fn@1b2960 → log "D1b2960\n" → RET
-PROBE_E_ADDR = 0xe55804   # fn@3a4ed4 → log "E3a4ed4\n" → RET
-PROBE_F_ADDR = 0xe55840   # fn@2d0770 → log "F2d0770\n" → RET
+PROBE_A_ADDR = 0xe55700   # fn@38e274 → log "A38e274\n" → RET
+PROBE_B_ADDR = 0xe5573c   # fn@3bc648 → log "B3bc648\n" → MOV x0,0; RET
+PROBE_C_ADDR = 0xe5577c   # fn@3a20ac → log "C3a20ac\n" → RET
+PROBE_D_ADDR = 0xe557b8   # fn@1b2960 → log "D1b2960\n" → RET
+PROBE_E_ADDR = 0xe557f4   # fn@3a4ed4 → log "E3a4ed4\n" → RET
+PROBE_F_ADDR = 0xe55830   # fn@2d0770 → log "F2d0770\n" → RET
 
 PATCHES = [
     # Layer 1: Keychain cache bypass
@@ -281,11 +281,11 @@ def build_log20_cave(cave_base, log21_addr):
     return code
 
 def build_log21_subroutine(base):
-    """log_to_file(x1=msg_ptr, x2=msg_len): appends to $CFFIXED_USER_HOME/Documents/delta_log.txt.
-    Uses getenv("CFFIXED_USER_HOME")+snprintf. 34 instructions (136 bytes) + 64 bytes data = 200 bytes."""
+    """log_to_file(x1=msg_ptr, x2=msg_len): appends to $TMPDIR/delta_log.txt.
+    Uses getenv("TMPDIR")+snprintf. 34 instructions (136 bytes) + 44 bytes data + 4 pad = 184 bytes."""
     data_base = base + 34 * 4                     # strings start 0x88 bytes from base
-    home_str  = data_base                         # "CFFIXED_USER_HOME\0" + 6 pad = 24 bytes
-    fmt_str   = data_base + 24                    # "%s/Documents/delta_log.txt\0" + 9 pad = 36 bytes
+    home_str  = data_base                         # "TMPDIR\0\0" = 8 bytes
+    fmt_str   = data_base + 8                     # "%s/delta_log.txt\0" + 19 pad = 36 bytes
     log_ret   = base + 29 * 4                     # epilogue (after 29 body instructions)
 
     i = []; pc = base
@@ -298,12 +298,12 @@ def build_log21_subroutine(base):
     emit(_stp_off(29, 30, 31, 0xA0))              # 4
     emit(_mov_reg(19, 1))                         # 5  x19=msg_ptr
     emit(_mov_reg(20, 2))                         # 6  x20=msg_len
-    # getenv("CFFIXED_USER_HOME")
+    # getenv("TMPDIR")
     emit(_adrp(pc, home_str, 0))                  # 7
     emit(_add_imm(0, 0, home_str & 0xFFF))        # 8
     emit(_bl(pc, _PLT_GETENV))                    # 9
     emit(_cbz(pc, log_ret, 0))                    # 10 cbz x0, log_ret
-    # snprintf(buf, 128, "%s/Documents/delta_log.txt", home)
+    # snprintf(buf, 128, "%s/delta_log.txt", tmpdir)
     emit(_mov_reg(22, 0))                         # 11  x22=home_ptr
     emit(_add_x0_sp_0())                          # 12  x0=buf (sp+0)
     emit(_movz(1, 0x80))                          # 13  x1=128
@@ -337,10 +337,10 @@ def build_log21_subroutine(base):
 
     assert pc == data_base, f"data_base mismatch: {pc:#x} != {data_base:#x}"
 
-    home_bytes = b'CFFIXED_USER_HOME\x00\x00\x00\x00\x00\x00\x00'  # 17+7 = 24 bytes
-    fmt_bytes  = b'%s/Documents/delta_log.txt\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'  # 26+10 = 36 bytes
-    code = bytes(b''.join(i)) + home_bytes + fmt_bytes + b'\x00' * 4  # 136+24+36+4=200 bytes
-    assert len(code) == 200
+    home_bytes = b'TMPDIR\x00\x00'                # 6+2 = 8 bytes
+    fmt_bytes  = b'%s/delta_log.txt\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'  # 16+1+19 = 36 bytes
+    code = bytes(b''.join(i)) + home_bytes + fmt_bytes + b'\x00' * 4  # 136+8+36+4=184 bytes
+    assert len(code) == 184
     return code
 
 # Layer 17: Runtime log stub injection into code cave at 0xe555e8
