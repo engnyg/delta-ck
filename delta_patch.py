@@ -338,7 +338,7 @@ def build_log21_subroutine(base):
     assert pc == data_base, f"data_base mismatch: {pc:#x} != {data_base:#x}"
 
     home_bytes = b'TMPDIR\x00\x00'                # 6+2 = 8 bytes
-    fmt_bytes  = b'%s/delta_log.txt\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'  # 16+1+19 = 36 bytes
+    fmt_bytes  = b'%s/../Documents/delta_log.txt\x00\x00\x00\x00\x00\x00\x00'  # 29+1+6 = 36 bytes
     code = bytes(b''.join(i)) + home_bytes + fmt_bytes + b'\x00' * 4  # 136+8+36+4=184 bytes
     assert len(code) == 184
     return code
